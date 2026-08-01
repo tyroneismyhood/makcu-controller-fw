@@ -1,12 +1,17 @@
 # MAKCM Controller Passthrough — community fix
 
+An open-source firmware and accessibility-tool project maintained by Keyrose Creative.
+
 This was 100% done with the help of Claude.
 
 💬 **Community:** [Join The S&Box Discord](https://discord.gg/hPFZbJwY2Z) — come share
 what you're building with Titan2 and makcu/controller.
 
-☕ **Support:** [Buy me a coffee](https://buymeacoffee.com/OsoCute) — if this
-project helped you out.
+**Support development:** [Support MAKCU Controller Firmware through Stripe]()
+
+Optional support payments help fund continued firmware development, hardware testing, accessibility tools, documentation, and project expenses. The firmware remains available under its existing licenses.
+
+See [Project and Payment Support](SUPPORT.md) for technical-support and payment information.
 
 ## Releases
 
@@ -31,6 +36,26 @@ Elite (1698), One S (1708), and Series X (1914).
 
 Quick walkthrough of the repo layout, example firmware/tools, and hardware
 validation flow.
+
+## Support the project
+
+MAKCU Controller Firmware is an independently maintained open-source project from **Keyrose Creative**.
+
+The repository, firmware releases, documentation, and included tools are available without requiring payment. Users who find the project useful may optionally support continued development through Stripe:
+
+[**Support MAKCU Controller Firmware development →**]()
+
+Support payments may be used toward:
+
+- MAKCU and controller hardware for compatibility testing
+- Firmware development and debugging
+- Accessibility-tool development
+- Documentation and release preparation
+- Software services and other project expenses
+
+A support payment does not purchase firmware, hardware, a software license, ownership, equity, guaranteed technical support, guaranteed compatibility, or influence over the project roadmap.
+
+For payment questions, contact **Keyrose Creative**.
 
 The MAKCM (dual-ESP32-S3 "MAKCU" board) **game controller passthrough
 firmware** shipped unfinished. This repo carries the fixes needed to make it
