@@ -1,4 +1,8 @@
 dependencies:
   espressif/esp_tinyusb: "~1.4.4"
+  # Pin TinyUSB below 0.21: 0.21 added a 5th `is_isr` arg to usbd_edpt_xfer
+  # which breaks our pass driver. 0.19.0~3 matches the API used by the
+  # 2026-07-08 main bins (0.21.0~1 published 2026-07-14).
+  espressif/tinyusb: "0.19.0~3"
   idf:
     version: ">=4.4"
