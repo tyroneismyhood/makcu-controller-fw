@@ -217,12 +217,20 @@ static void km_ring_init(void) {
 // it doesn't add to the mouse injection. Applied ONLY while km injection
 // is live (see extract_physical_* clean_idle). Never used in pure
 // passthrough or accessibility-only paths.
-#define PHYSICAL_IDLE_DEADZONE  4000
+// Default 0 = Matrix-feel / micro-aim safe. Set live via km.idle_dz(N)
+// where N = measured rest |p99| (not mean) so noisy pads don't shrink
+// same-sign blend gain.
+#ifndef PHYSICAL_IDLE_DEADZONE
+#define PHYSICAL_IDLE_DEADZONE  0
+#endif
 
 // Three tasks collide on these (km_uart_task, esp_timer housekeeping,
 // TinyUSB km_apply). portMUX is lower-overhead than a mutex; sections
 // are very short.
 static portMUX_TYPE km_state_lock = portMUX_INITIALIZER_UNLOCKED;
+
+// Runtime idle deadzone for inject-path clean_idle (km.idle_dz).
+static _Atomic int32_t idle_dz = PHYSICAL_IDLE_DEADZONE;
 
 // Mouse convention (+ry = down). apply_gip / apply_xinput negate Y when
 // writing to XInput wire format; apply_ds5 writes raw.
@@ -368,6 +376,7 @@ void km_reset_injection(void) {
     portEXIT_CRITICAL(&km_state_lock);
     atomic_store(&trim_x, 0);
     atomic_store(&trim_y, 0);
+    atomic_store(&idle_dz, PHYSICAL_IDLE_DEADZONE);
     atomic_store(&btn_held, 0);
     atomic_store(&btn_click, 0);
     atomic_store(&click_release_ms, 0);
@@ -435,6 +444,17 @@ static void km_housekeep_cb(void *arg) {
     rx = rx_injected;
     ry = ry_injected;
     portEXIT_CRITICAL(&km_state_lock);
+
+    // Quiet merge stamp for host CSV (Tools): monotonic tick + drained ix/iy.
+    // Always on via km_uart_write_raw — independent of KM_RING / COM3_LOG.
+    {
+        static uint32_t kmh_tick = 0;
+        char kmh[64];
+        int kn = snprintf(kmh, sizeof(kmh),
+            "KMH tick=%u ix=%ld iy=%ld\n",
+            (unsigned)kmh_tick++, (long)rx, (long)ry);
+        if (kn > 0) km_uart_write_raw(kmh, kn);
+    }
 #if KM_DIAG
     km_diag_track_accum(rx, ry);
     if (++km_diag_ticks >= 25) {   // 8 ms × 25 = 200 ms snapshot
@@ -585,6 +605,13 @@ static void parse_km_text(const char *line, uint16_t len) {
     if (str_starts(buf, n, "km.telem(")) {
         int v = 0; sscanf(buf + 9, "%d", &v);
         atomic_store(&telem_on, v ? 1 : 0); return;
+    }
+    // km.idle_dz(N) — inject-path idle clamp; N = rest |p99|, 0 = off.
+    if (str_starts(buf, n, "km.idle_dz(")) {
+        int v = 0; sscanf(buf + 11, "%d", &v);
+        if (v < 0) v = 0;
+        if (v > 32000) v = 32000;
+        atomic_store(&idle_dz, (int32_t)v); return;
     }
     if (str_starts(buf, n, "km.trim(")) {
         const char *a = strchr(buf, '('); if (!a) return; a++;
@@ -782,13 +809,16 @@ static void apply_ds5(uint8_t *buf, uint16_t len, int16_t mrx, int16_t mry, uint
 // from the incoming IN report BEFORE injection is overlaid. Return in
 // mouse convention (+Y = down).
 static inline int32_t physical_deadzone_clean(int32_t v) {
-    if (v > -PHYSICAL_IDLE_DEADZONE && v < PHYSICAL_IDLE_DEADZONE) return 0;
+    int32_t dz = atomic_load(&idle_dz);
+    if (dz <= 0) return v;
+    if (v > -dz && v < dz) return 0;
     return v;
 }
 
-// clean_idle: when true, clamp resting noise so it does not sum into mouse
-// injection. When false (accessibility-only / wire path), keep raw axes —
-// PHYSICAL_IDLE_DEADZONE must never soften sticks unless injection is live.
+// clean_idle: when true, clamp resting noise (idle_dz / km.idle_dz) so it
+// does not sum into mouse injection. When false (accessibility-only / wire
+// path), keep raw axes — idle_dz must never soften sticks unless injection
+// is live.
 static inline void extract_physical_ds5(const uint8_t *buf, int32_t *rx, int32_t *ry,
                                         bool clean_idle) {
     int32_t x = ((int32_t)buf[3] - 128) << 8;
@@ -885,8 +915,9 @@ void km_apply(uint8_t ep_addr, uint8_t *buf, uint16_t len) {
     const bool modify = km_wants_report_modify();
     const bool inj_live = km_has_active_injection();
 
-    // GIP (Xbox One / Scuf / PowerA / Elite / GameSir) — IN EP 0x82, cmd 0x20 after 4B GIP header
-    if (ep_addr == 0x82 && len >= 20 && buf[0] == 0x20) {
+    // GIP (Xbox One / Scuf / PowerA / Elite / GameSir) — IN EP 0x81 or 0x82
+    // (Elite 1698 often 0x81; One S / Series X typically 0x82), cmd 0x20 after 4B header
+    if ((ep_addr == 0x81 || ep_addr == 0x82) && len >= 20 && buf[0] == 0x20) {
         const uint8_t *gp = buf + 4;
         atomic_store(&tel_lx, (int32_t)rd_s16(gp + 6));
         atomic_store(&tel_ly, (int32_t)-rd_s16(gp + 8));

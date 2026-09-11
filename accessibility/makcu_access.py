@@ -113,22 +113,44 @@ class Makcu:
         cl = lambda v: max(-32767, min(32767, int(v)))
         self._send(f"km.trim({cl(x)},{cl(y)})")
 
+    def idle_dz(self, n):
+        """Inject-path physical idle deadzone (0..32000). Default 0 (Matrix-feel).
+        Only applied while km injection is live. Set to measured rest |p99|
+        if a noisy pad fights same-sign blend; 0 keeps micro-aim intact."""
+        self._send(f"km.idle_dz({max(0, min(32000, int(n)))})")
+
     # --- telemetry (physical sticks + buttons streamed back) ----------------
     def telem(self, on):
         self._send(f"km.telem({1 if on else 0})")
 
     def read_telem(self):
-        """Yield parsed telemetry dicts from the 'KMS ...' lines the firmware
-        streams when telem is on. Blocks on the serial read timeout."""
+        """Yield parsed telemetry dicts from firmware UART lines.
+
+        - KMS ... (when km.telem on): physical sticks/buttons
+        - KMH tick= ix= iy= (always on): housekeep drain stamp for latency CSV
+
+        Dicts include key "_kind" = "kms" | "kmh".
+        """
         buf = b""
         while True:
             buf += self.ser.read(256)
             while b"\n" in buf:
                 line, buf = buf.split(b"\n", 1)
                 s = line.decode("ascii", "replace").strip()
+                if s.startswith("KMH "):
+                    d = {"_kind": "kmh"}
+                    for tok in s[4:].split():
+                        k, _, v = tok.partition("=")
+                        try:
+                            d[k] = int(v)
+                        except ValueError:
+                            pass
+                    if {"tick", "ix", "iy"} <= d.keys():
+                        yield d
+                    continue
                 if not s.startswith("KMS "):
                     continue
-                d = {}
+                d = {"_kind": "kms"}
                 for tok in s[4:].split():
                     k, _, v = tok.partition("=")
                     d[k] = int(v, 16) if k == "b" else int(v)

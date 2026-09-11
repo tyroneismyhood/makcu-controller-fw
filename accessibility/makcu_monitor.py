@@ -52,6 +52,8 @@ def main():
     t_end = time.time() + 5.0
     last_print = 0
     for d in mk.read_telem():
+        if d.get("_kind") == "kmh":
+            continue  # drain stamp — not stick shake
         samples.append(d)
         if d["b"]:
             seen_btn.add(d["b"])
@@ -89,6 +91,11 @@ def main():
     print(f"    mk.steady(True)")
     print("Then feel it out in-game and nudge from there — bigger deadzone if")
     print("aim still drifts, lower smoothing if it feels laggy.")
+    print("")
+    print("For Matrix-like M&K translation, leave tremor filter OFF and keep")
+    print("idle_dz at 0 (default). Only raise it if rest |p99| fights blend:")
+    print("    mk.steady(False)")
+    print("    mk.idle_dz(0)          # or mk.idle_dz(<rest_p99>)")
 
     # Drift trim: if the stick rests off-center (hardware drift), the mean is
     # nonzero. Cancel it with the opposite offset. Only bother if it's sizable.
