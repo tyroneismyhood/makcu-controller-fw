@@ -136,9 +136,40 @@ What it does:
 Objective PASS/FAIL remains the default when `--360` is not passed;
 `--game-pulse` is unchanged for a quick visual burst after objective.
 
+## Swipe Lab (schema v2 + Elgato preflight)
+
+Lab laptop product path (preview UI, void-gates, lag calib, rich JSON) lives under
+`tools/`. Operator guide: **[tools/SWIPE_LAB.md](../tools/SWIPE_LAB.md)**.
+
+| Module | Role |
+|--------|------|
+| `tools/swipe_preflight.py` | Shared void-gates + `LagCalibration` — UI must import |
+| `tools/elgato_capture.py` | Pin Elgato by name/VID (never silent index 0) |
+| `tools/swipe_results_lib.py` | Schema **v2** (`void`, `lag_offset_ms`, acceptance, calibration) |
+| `tools/swipe_keybinds.py` | OpenCV keybind contract |
+| `tools/swipe_acceptance.py` | Accuracy+Matrix v1 thresholds + Matrix labels |
+
+Score vision only when `swipe_preflight.score_allowed(state)` — void ≠ soft/late.
+Join vision via lab monotonic + `lag_offset_ms` → KMH tick (never dual-PC wall clock).
+Bring-up checklist: Bench `ELGATO_SWIPE_LAB_BRINGUP.md`.
+
 ## Related
 
 - [FLASHING.md](../FLASHING.md) — boot buttons, Error 1 = success, DIO 80 MHz
 - [docs/PC_CONNECTION_GUIDE.md](PC_CONNECTION_GUIDE.md) — USB1/2/3 roles
 - [tools/kmh_fidelity_csv.py](../tools/kmh_fidelity_csv.py) — CSV harness for the same curve
 - [tools/swipe_test.py](../tools/swipe_test.py) — PASS/FAIL known-swipe + `--360` feel/deadzone
+
+## Swipe Lab UI preflight (Elgato + dual laptop)
+
+Before any **automated 360 score**, run preflight on the lab PC:
+
+```bash
+python tools/swipe_ui.py --elgato-name "Elgato" --set-lag-ms <ms> --mark-flash-green --preflight-only
+python tools/swipe_ui.py --port COM5 --360   # blocked unless score_allowed
+```
+
+Void gates (not soft/late): wrong cam / unpinned Elgato, HDCP/black/exclusive,
+drops, unknown/stale lag, flash sheet not green, wall-clock merge, ROI/colorspace drift.
+See Bench bring-up notes and `tools/swipe_preflight.py`.
+
