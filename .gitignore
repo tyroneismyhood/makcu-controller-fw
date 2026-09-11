@@ -18,3 +18,12 @@ accessibility/config.json
 
 # Vendor stock binaries kept locally for rollback (not distributed)
 firmware/bin/stock/
+
+# YOLO weights / local lab dumps
+*.pt
+*.onnx
+tools/results/swipe_results_*
+tools/results/yolo_*
+tools/results/preflight_*.json
+tools/results/lag_calib.json
+tools/results/preflight_state.json

@@ -198,3 +198,24 @@ Helpers: `set_yolo_roi` / `apply_yolo_block` in `swipe_results_lib`;
 `schema_yolo_block` / `bbox_center_delta` in `yolo_roi`.
 
 Use `apply_preflight(report, preflight_schema_fields(state))` before `write_results`.
+
+
+---
+
+## Peer UI (OpenCV lab)
+
+```bash
+pip install pyserial opencv-python numpy
+# optional YOLO:
+pip install ultralytics   # or onnxruntime + yolov8n.onnx
+
+python tools/swipe_ui.py --preflight-only
+python tools/swipe_ui.py --port COM5 --lab
+# keys: r ROI, d detector, click lock target, 0/1 T0/T1 snaps, h/m hip/ads,
+#       a Run All (objective+rest+YOLO 360 + schema v2 JSON), s save, q quit
+python tools/swipe_ui.py --port COM5 --run-all   # writes tools/results/swipe_results_*.json
+```
+
+Binary-search T* uses **YOLO** close error only (not optical flow). Final PASS
+still needs flow+ECC+phase; YOLO replaces feat_return. If YOLO PASS but
+yaw_flow SOFT/FAIL → `SCALE_DISAGREE` (no promote).

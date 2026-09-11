@@ -431,6 +431,28 @@ def run_360(
     expect_ok: bool,
 ) -> int:
     """Interactive (or --expect-ok) 360 feel: rest dz once, then hip and/or ads."""
+    # Vision/Swipe Lab automated 360: set SWIPE_REQUIRE_PREFLIGHT=1 to enforce
+    # Elgato pin + lag + flash void-gates (see tools/swipe_ui.py). Human visual
+    # --360 does not need capture hardware.
+    if os.environ.get("SWIPE_REQUIRE_PREFLIGHT") == "1":
+        try:
+            from swipe_preflight import (
+                LagCalibration,
+                PreflightState,
+                check_void_gates,
+                load_preflight_state,
+            )
+            st = load_preflight_state()
+            st.lag = LagCalibration.load()
+            vr = check_void_gates(st)
+            if vr.void:
+                print(f"PREFLIGHT VOID: {vr.void_reason} — {vr.detail}")
+                print("  VOID ≠ soft/late; fix via tools/swipe_ui.py")
+                return 1
+        except Exception as exc:
+            print(f"PREFLIGHT BLOCK: {exc}")
+            return 1
+
     print("=== 360° feel + deadzone calibration (hip + ADS) ===")
     print("  honest: 360 is VISUAL at your sens — firmware does not report degrees")
     print("  hip: look sens = 2 (unscoped)  |  ads: aim sens = 1.50 (script holds LT)")
