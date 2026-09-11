@@ -96,34 +96,42 @@ python tools/swipe_test.py COM5 --game-pulse 40
 
 ---
 
-## 360° feel + deadzone (`--360`)
+## 360° feel + deadzone (`--360`) — hip vs ADS
 
 Interactive calibration from the **2nd PC** over USB2. The script cannot see
-Warzone — it sends a known horizontal `km.move` budget; you watch the camera
-and report under / over / ok. Visual 360 only at **your** sens (start with
-look **2** / aim **1.50**). No fake degrees from firmware.
+Warzone — two separate visual 360s at **your** sens. No fake degrees from
+firmware.
+
+| Mode | In-game | TOTAL flag | Default | ADS |
+|------|---------|-----------|---------|-----|
+| **Hip-fire** | look sens **2**, unscoped | `--total-hip` | 2400 | not held |
+| **ADS / aim** | aim sens **1.50** | `--total-ads` | 1800 (≈0.75× hip) | script holds `km.right(1)` for the pulse, then `km.right(0)` (LT) |
 
 ```bash
-python tools/swipe_test.py COM5 --360
-python tools/swipe_test.py COM5 --360 --total 2400
+python tools/swipe_test.py COM5 --360              # rest dz once → hip loop → ads loop
+python tools/swipe_test.py COM5 --360 hip          # hip only
+python tools/swipe_test.py COM5 --360 ads          # ads only
+python tools/swipe_test.py COM5 --360 --total-hip 2400 --total-ads 1800
 python tools/swipe_test.py COM5 --360 --idle-dz 0
-# optional: apply suggested rest |p99| as idle_dz
 python tools/swipe_test.py COM5 --360 --apply-dz
-# scripted one-shot (no prompts):
-python tools/swipe_test.py COM5 --360 --total 2400 --expect-ok
+# scripted one-shot per selected mode (no prompts):
+python tools/swipe_test.py COM5 --360 --expect-ok
+# --total is a legacy alias for --total-hip
 ```
 
 What it does:
 
-1. Handshake (`km.version()`) + look/aim reminder.
-2. Rest sample (~2.5 s, sticks still) → prints `|rx|/|ry| p99` and suggested
-   `km.idle_dz(N)` (0 if quiet). Default leaves idle_dz at 0 unless you pass
+1. Handshake (`km.version()`) + hip/ADS sens reminders.
+2. Rest sample once (~2.5 s, sticks still) → `|rx|/|ry| p99` and suggested
+   `km.idle_dz(N)` (0 if quiet). Default leaves idle_dz at 0 unless
    `--idle-dz N` or `--apply-dz`.
-3. Paced horizontal pulse (TOTAL mouse-delta budget, default 2400 @ 8 ms ticks).
-4. Prompt: `under` / `over` / `ok` / `quit` — suggests ×1.15 / ×0.85 and re-runs.
-5. On `ok`: prints matched TOTAL + app-side scale tip
-   (`TOTAL_matched / 2400`). Firmware curve stays fixed `C=5046 P=0.40` —
-   tune the sender app or `--total`, not `km.sens` (does not exist on this fw).
+3. **Hip** paced pulse (`TOTAL_hip`, default 2400 @ 8 ms) → under/over/ok/quit.
+4. **ADS** paced pulse (`TOTAL_ads`, default 1800) with LT held via firmware →
+   same prompt loop.
+5. Prints **finals**: `idle_dz_suggested`, `idle_dz_applied`, `TOTAL_hip`,
+   `TOTAL_ads`, and app-side scale tips vs those defaults. Firmware curve stays
+   fixed `C=5046 P=0.40` — tune the sender app or `--total-hip`/`--total-ads`,
+   not `km.sens` (does not exist on this fw).
 
 Objective PASS/FAIL remains the default when `--360` is not passed;
 `--game-pulse` is unchanged for a quick visual burst after objective.

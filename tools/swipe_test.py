@@ -13,17 +13,23 @@ Objective fidelity over the stock km API at 4 000 000 baud:
   5) Optional --game-pulse N: human-visible horizontal burst for joy.cpl / in-game
      look check (script cannot see the game).
 
-360° feel + deadzone calibration (--360) — interactive, visual at HIS sens:
-  Script cannot see Warzone. It sends a known horizontal mouse-delta budget;
-  Dylan watches the camera and reports under / over / ok. No fake "degrees"
-  from firmware — honest visual 360 at look=2 / aim=1.50.
+360° feel + deadzone calibration (--360) — TWO separate visual tests:
+  Script cannot see Warzone. Each mode sends its own horizontal mouse-delta
+  budget; Dylan watches the camera and reports under / over / ok. No fake
+  "degrees" from firmware.
+
+  1) Hip-fire — look sens 2, no ADS. TOTAL from --total-hip (default 2400).
+  2) ADS / aim — aim sens 1.50. TOTAL from --total-ads (default 1800).
+     Script holds ADS via km.right(1) for the pulse, then km.right(0).
 
 Usage (on the 2nd PC, USB2 CH343 plugged in):
   pip install pyserial
   python tools/swipe_test.py COM5
   python tools/swipe_test.py COM5 --game-pulse 40
   python tools/swipe_test.py COM5 --360
-  python tools/swipe_test.py COM5 --360 --total 2400
+  python tools/swipe_test.py COM5 --360 hip
+  python tools/swipe_test.py COM5 --360 ads
+  python tools/swipe_test.py COM5 --360 --total-hip 2400 --total-ads 1800
   python tools/swipe_test.py COM5 --360 --idle-dz 0
   python tools/swipe_test.py          # uses accessibility/config.json port
 
@@ -50,11 +56,13 @@ SHAPE_TOL = 0.03  # ±3%
 STOP_BUDGET_MS = 16.0
 MAGNITUDES = (8, 80, 240)
 
-DEFAULT_TOTAL = 2400
+DEFAULT_TOTAL_HIP = 2400
+DEFAULT_TOTAL_ADS = 1800  # ≈ 0.75 × hip start
 DEFAULT_CHUNK_DX = 120
 REST_SAMPLE_S = 2.5
 UNDER_SCALE = 1.15
 OVER_SCALE = 0.85
+ADS_SETTLE_S = 0.08
 
 
 def xim_curve(accum: int) -> int:
@@ -218,6 +226,16 @@ def measure_rest_p99(mk: Makcu, seconds: float = REST_SAMPLE_S) -> tuple[int, in
     return rx_p99, ry_p99, len(rx_vals)
 
 
+def ads_hold(mk: Makcu, on: bool) -> None:
+    """Hold/release LT/ADS via firmware km.right(1/0) (stock mapping)."""
+    if on:
+        mk._send("km.right(1)")
+        mk._held.add("LT")
+    else:
+        mk._send("km.right(0)")
+        mk._held.discard("LT")
+
+
 def send_360_pulse(mk: Makcu, total: int, chunk_dx: int) -> int:
     """Paced km.move(dx,0) every TICK_MS until |accum| >= total. Returns accum sent."""
     if total <= 0:
@@ -244,11 +262,13 @@ def send_360_pulse(mk: Makcu, total: int, chunk_dx: int) -> int:
     return sent
 
 
-def prompt_feel() -> str:
+def prompt_feel(label: str) -> str:
     """Interactive under/over/ok/quit. Returns normalized token."""
     while True:
         try:
-            raw = input("  camera ~one full 360? [under / over / ok / quit]: ").strip().lower()
+            raw = input(
+                f"  [{label}] camera ~one full 360? [under / over / ok / quit]: "
+            ).strip().lower()
         except EOFError:
             print()
             return "quit"
@@ -263,9 +283,9 @@ def prompt_feel() -> str:
         print("  type: under | over | ok | quit")
 
 
-def print_ok_tips(total: int, total_default: int) -> None:
+def print_mode_ok_tips(label: str, total: int, total_default: int) -> None:
     print()
-    print(f"=== matched TOTAL = {total} ===")
+    print(f"=== [{label}] matched TOTAL = {total} ===")
     if total_default > 0:
         scale = total / float(total_default)
         print(
@@ -274,7 +294,7 @@ def print_ok_tips(total: int, total_default: int) -> None:
         )
     print(
         f"  firmware curve is fixed C={C:g} P={P} — tune the sender app or "
-        f"--total, not km.sens (does not exist on this fw)."
+        f"--total-hip/--total-ads, not km.sens (does not exist on this fw)."
     )
     print(
         "  reminder: this was a VISUAL 360 at your in-game look/aim — "
@@ -282,25 +302,144 @@ def print_ok_tips(total: int, total_default: int) -> None:
     )
 
 
+def calibrate_mode(
+    mk: Makcu,
+    *,
+    label: str,
+    sens_hint: str,
+    total: int,
+    total_default: int,
+    chunk_dx: int,
+    expect_ok: bool,
+    hold_ads: bool,
+) -> tuple[int, str]:
+    """
+    Run one 360 mode loop. Returns (final_total, status) where status is
+    'ok' | 'expect-ok' | 'stopped' | 'quit'.
+    """
+    cur_total = max(1, int(total))
+    print()
+    print(f"=== {label} 360 ===")
+    print(f"  in-game: {sens_hint}")
+    if hold_ads:
+        print("  ADS: script will hold km.right(1) during pulse, then km.right(0)")
+    else:
+        print("  hip-fire: no ADS held — stay unscoped")
+
+    def _pulse_once() -> None:
+        if hold_ads:
+            ads_hold(mk, True)
+            time.sleep(ADS_SETTLE_S)
+        try:
+            print("  Watch in-game: did the camera do ~one full 360?")
+            send_360_pulse(mk, cur_total, chunk_dx)
+        finally:
+            if hold_ads:
+                ads_hold(mk, False)
+                time.sleep(0.05)
+
+    if expect_ok:
+        print(f"  (--expect-ok, non-interactive) TOTAL={cur_total}")
+        _pulse_once()
+        print(f"  [{label}] TOTAL used: {cur_total}")
+        print_mode_ok_tips(label, cur_total, total_default)
+        return cur_total, "expect-ok"
+
+    while True:
+        print()
+        print(f"=== [{label}] 360 pulse (TOTAL={cur_total}) ===")
+        _pulse_once()
+        ans = prompt_feel(label)
+        if ans == "quit":
+            print(f"  [{label}] quit — last TOTAL tried: {cur_total}")
+            return cur_total, "quit"
+        if ans == "ok":
+            print_mode_ok_tips(label, cur_total, total_default)
+            return cur_total, "ok"
+        if ans == "under":
+            nxt = max(1, int(round(cur_total * UNDER_SCALE)))
+            print(f"  under → suggest TOTAL {cur_total} → {nxt} (×{UNDER_SCALE})")
+            try:
+                again = input("  re-run with new TOTAL? [Y/n]: ").strip().lower()
+            except EOFError:
+                print()
+                return cur_total, "stopped"
+            if again in ("", "y", "yes"):
+                cur_total = nxt
+                continue
+            print(
+                f"  [{label}] stopped — suggested next TOTAL={nxt} "
+                f"(last tried={cur_total})"
+            )
+            return cur_total, "stopped"
+        if ans == "over":
+            nxt = max(1, int(round(cur_total * OVER_SCALE)))
+            print(f"  over → suggest TOTAL {cur_total} → {nxt} (×{OVER_SCALE})")
+            try:
+                again = input("  re-run with new TOTAL? [Y/n]: ").strip().lower()
+            except EOFError:
+                print()
+                return cur_total, "stopped"
+            if again in ("", "y", "yes"):
+                cur_total = nxt
+                continue
+            print(
+                f"  [{label}] stopped — suggested next TOTAL={nxt} "
+                f"(last tried={cur_total})"
+            )
+            return cur_total, "stopped"
+
+
+def print_finals(
+    *,
+    idle_dz_suggested: int,
+    idle_dz_applied: int,
+    hip: tuple[int, str] | None,
+    ads: tuple[int, str] | None,
+) -> None:
+    print()
+    print("=== finals ===")
+    print(f"  idle_dz_suggested={idle_dz_suggested}")
+    print(f"  idle_dz_applied={idle_dz_applied}")
+    if hip is not None:
+        total, status = hip
+        scale = total / float(DEFAULT_TOTAL_HIP) if DEFAULT_TOTAL_HIP else 0.0
+        print(f"  TOTAL_hip={total}  status={status}  scale_hip≈{scale:.3f} (vs default {DEFAULT_TOTAL_HIP})")
+    else:
+        print("  TOTAL_hip=(skipped)")
+    if ads is not None:
+        total, status = ads
+        scale = total / float(DEFAULT_TOTAL_ADS) if DEFAULT_TOTAL_ADS else 0.0
+        print(f"  TOTAL_ads={total}  status={status}  scale_ads≈{scale:.3f} (vs default {DEFAULT_TOTAL_ADS})")
+    else:
+        print("  TOTAL_ads=(skipped)")
+    print(
+        f"  firmware curve fixed C={C:g} P={P} — tune app or "
+        f"--total-hip/--total-ads, not km.sens"
+    )
+
+
 def run_360(
     mk: Makcu,
     *,
-    total: int,
+    which: str,
+    total_hip: int,
+    total_ads: int,
     chunk_dx: int,
     idle_dz_cli: int | None,
     apply_dz: bool,
     expect_ok: bool,
-    total_default: int,
 ) -> int:
-    """Interactive (or --expect-ok) 360 feel + rest deadzone calibration."""
-    print("=== 360° feel + deadzone calibration ===")
-    print("  in-game reminder: look sens = 2 / aim = 1.50")
+    """Interactive (or --expect-ok) 360 feel: rest dz once, then hip and/or ads."""
+    print("=== 360° feel + deadzone calibration (hip + ADS) ===")
     print("  honest: 360 is VISUAL at your sens — firmware does not report degrees")
+    print("  hip: look sens = 2 (unscoped)  |  ads: aim sens = 1.50 (script holds LT)")
     print()
 
     mk.steady(False)
     mk.trim(0, 0)
-    # Start quiet for rest measurement.
+    # Ensure ADS is released before rest sample.
+    ads_hold(mk, False)
     mk.idle_dz(0)
     time.sleep(0.05)
 
@@ -313,66 +452,60 @@ def run_360(
         print(f"  suggested km.idle_dz({suggested})  (rest |p99|)")
 
     if idle_dz_cli is not None:
-        dz = max(0, min(32000, int(idle_dz_cli)))
-        mk.idle_dz(dz)
-        print(f"  applied idle_dz={dz} (--idle-dz)")
+        dz_applied = max(0, min(32000, int(idle_dz_cli)))
+        mk.idle_dz(dz_applied)
+        print(f"  applied idle_dz={dz_applied} (--idle-dz)")
     elif apply_dz:
-        dz = max(0, min(32000, int(suggested)))
-        mk.idle_dz(dz)
-        print(f"  applied idle_dz={dz} (--apply-dz)")
+        dz_applied = max(0, min(32000, int(suggested)))
+        mk.idle_dz(dz_applied)
+        print(f"  applied idle_dz={dz_applied} (--apply-dz)")
     else:
+        dz_applied = 0
         mk.idle_dz(0)
         print("  leaving idle_dz=0 (pass --apply-dz or --idle-dz N to set)")
 
-    print()
-    cur_total = max(1, int(total))
+    do_hip = which in ("both", "hip")
+    do_ads = which in ("both", "ads")
+    hip_result: tuple[int, str] | None = None
+    ads_result: tuple[int, str] | None = None
 
-    if expect_ok:
-        print("=== 360 pulse (--expect-ok, non-interactive) ===")
-        print("  Watch in-game: did the camera do ~one full 360?")
-        send_360_pulse(mk, cur_total, chunk_dx)
-        print(f"  TOTAL used: {cur_total}")
-        print_ok_tips(cur_total, total_default)
-        return 0
+    if do_hip:
+        hip_result = calibrate_mode(
+            mk,
+            label="hip",
+            sens_hint="look sens = 2, NO ADS",
+            total=total_hip,
+            total_default=DEFAULT_TOTAL_HIP,
+            chunk_dx=chunk_dx,
+            expect_ok=expect_ok,
+            hold_ads=False,
+        )
+        if hip_result[1] == "quit" and do_ads and not expect_ok:
+            print("  skipping ADS after quit")
+            do_ads = False
 
-    while True:
-        print()
-        print(f"=== 360 pulse (TOTAL={cur_total}) ===")
-        print("  Watch in-game: did the camera do ~one full 360?")
-        send_360_pulse(mk, cur_total, chunk_dx)
-        ans = prompt_feel()
-        if ans == "quit":
-            print(f"  quit — last TOTAL tried: {cur_total}")
-            return 0
-        if ans == "ok":
-            print_ok_tips(cur_total, total_default)
-            return 0
-        if ans == "under":
-            nxt = max(1, int(round(cur_total * UNDER_SCALE)))
-            print(f"  under → suggest TOTAL {cur_total} → {nxt} (×{UNDER_SCALE})")
-            try:
-                again = input("  re-run with new TOTAL? [Y/n]: ").strip().lower()
-            except EOFError:
-                print()
-                return 0
-            if again in ("", "y", "yes"):
-                cur_total = nxt
-                continue
-            print(f"  stopped — suggested next TOTAL={nxt} (last tried={cur_total})")
-            return 0
-        if ans == "over":
-            nxt = max(1, int(round(cur_total * OVER_SCALE)))
-            print(f"  over → suggest TOTAL {cur_total} → {nxt} (×{OVER_SCALE})")
-            try:
-                again = input("  re-run with new TOTAL? [Y/n]: ").strip().lower()
-            except EOFError:
-                print()
-                return 0
-            if again in ("", "y", "yes"):
-                cur_total = nxt
-                continue
-            print(f"  stopped — suggested next TOTAL={nxt} (last tried={cur_total})")
-            return 0
+    if do_ads:
+        ads_result = calibrate_mode(
+            mk,
+            label="ads",
+            sens_hint="aim sens = 1.50 (ADS held by script)",
+            total=total_ads,
+            total_default=DEFAULT_TOTAL_ADS,
+            chunk_dx=chunk_dx,
+            expect_ok=expect_ok,
+            hold_ads=True,
+        )
+
+    # Always release ADS on the way out.
+    ads_hold(mk, False)
+
+    print_finals(
+        idle_dz_suggested=suggested,
+        idle_dz_applied=dz_applied,
+        hip=hip_result,
+        ads=ads_result,
+    )
+    return 0
 
 
 def main() -> int:
@@ -396,22 +529,39 @@ def main() -> int:
     ap.add_argument(
         "--360",
         dest="mode_360",
-        action="store_true",
-        help="interactive 360° feel + rest deadzone calibration (skips objective)",
+        nargs="?",
+        const="both",
+        default=None,
+        choices=("hip", "ads", "both"),
+        help="360° calibration: both (default), or 'hip' / 'ads' only (skips objective)",
+    )
+    ap.add_argument(
+        "--total-hip",
+        type=int,
+        default=None,
+        metavar="N",
+        help=f"360 hip-fire TOTAL mouse-delta budget (default: {DEFAULT_TOTAL_HIP})",
+    )
+    ap.add_argument(
+        "--total-ads",
+        type=int,
+        default=None,
+        metavar="N",
+        help=f"360 ADS TOTAL mouse-delta budget (default: {DEFAULT_TOTAL_ADS})",
     )
     ap.add_argument(
         "--total",
         type=int,
-        default=DEFAULT_TOTAL,
+        default=None,
         metavar="N",
-        help=f"360 mode: total horizontal mouse-delta budget (default: {DEFAULT_TOTAL})",
+        help="alias for --total-hip (legacy)",
     )
     ap.add_argument(
         "--chunks",
         type=int,
         default=None,
         metavar="N",
-        help="360 mode: TOTAL = N × --chunk-dx (overrides --total)",
+        help="360 mode: TOTAL_hip = N × --chunk-dx (overrides --total-hip/--total)",
     )
     ap.add_argument(
         "--chunk-dx",
@@ -435,7 +585,7 @@ def main() -> int:
     ap.add_argument(
         "--expect-ok",
         action="store_true",
-        help="360 mode: fire one pulse at --total and exit (non-interactive)",
+        help="360 mode: fire one pulse per selected mode and exit (non-interactive)",
     )
     args = ap.parse_args()
 
@@ -446,21 +596,34 @@ def main() -> int:
     print(f"link: {ver}")
     print()
 
-    if args.mode_360:
+    if args.mode_360 is not None:
         chunk_dx = max(1, int(args.chunk_dx))
+        # Resolve hip total: --chunks > --total-hip > --total > default
         if args.chunks is not None:
-            total = max(1, int(args.chunks) * chunk_dx)
-            print(f"TOTAL from --chunks: {args.chunks} × {chunk_dx} = {total}")
+            total_hip = max(1, int(args.chunks) * chunk_dx)
+            print(f"TOTAL_hip from --chunks: {args.chunks} × {chunk_dx} = {total_hip}")
+        elif args.total_hip is not None:
+            total_hip = max(1, int(args.total_hip))
+        elif args.total is not None:
+            total_hip = max(1, int(args.total))
+            print(f"TOTAL_hip from --total alias: {total_hip}")
         else:
-            total = max(1, int(args.total))
+            total_hip = DEFAULT_TOTAL_HIP
+
+        if args.total_ads is not None:
+            total_ads = max(1, int(args.total_ads))
+        else:
+            total_ads = DEFAULT_TOTAL_ADS
+
         return run_360(
             mk,
-            total=total,
+            which=args.mode_360,
+            total_hip=total_hip,
+            total_ads=total_ads,
             chunk_dx=chunk_dx,
             idle_dz_cli=args.idle_dz,
             apply_dz=args.apply_dz,
             expect_ok=args.expect_ok,
-            total_default=DEFAULT_TOTAL,
         )
 
     print("=== objective fidelity (Track B curve C=5046 P=0.40) ===")
