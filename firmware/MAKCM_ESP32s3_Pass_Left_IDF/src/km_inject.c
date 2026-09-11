@@ -214,7 +214,9 @@ static void km_ring_init(void) {
 #define CLICK_HOLD_MS           120
 
 // Analog stick idle noise floor — drift below this is clamped to zero so
-// it doesn't add to the mouse injection.
+// it doesn't add to the mouse injection. Applied ONLY while km injection
+// is live (see extract_physical_* clean_idle). Never used in pure
+// passthrough or accessibility-only paths.
 #define PHYSICAL_IDLE_DEADZONE  4000
 
 // Three tasks collide on these (km_uart_task, esp_timer housekeeping,
@@ -268,8 +270,10 @@ static _Atomic int32_t trim_y = 0;
 // km.telem(1|0) toggles it. Emitted from the 8 ms housekeep timer (NOT the
 // USB callback — km_uart_write_raw blocks, so it must never run there) so it
 // can't stall the USB pipe. ASCII line format:
-//   KMS lx=<i> ly=<i> rx=<i> ry=<i> b=<hex>\n
-// Values are RAW physical (pre-deadzone) so a monitor can measure true shake.
+//   KMS lx= ly= rx= ry= b= n= ep= b0= len= ix= iy= ax= ay= dt= lat=\n
+// lx..ry are RAW physical (pre-deadzone). ix/iy = last injected stick;
+// ax/ay = time-normalized accum; dt = drain interval ms; lat = first
+// move in window → drain ms.
 #ifndef KM_TELEM
 #define KM_TELEM 0
 #endif
@@ -383,6 +387,15 @@ bool km_has_active_injection(void) {
     if (ix || iy) return true;
     if (atomic_load(&btn_held)  != 0) return true;
     if (atomic_load(&btn_click) != 0) return true;
+    return false;
+}
+
+// True only when a report may be altered. Wire-perfect passthrough requires
+// this to be false: no km stick/button overlay and no accessibility filters.
+static inline bool km_wants_report_modify(void) {
+    if (km_has_active_injection()) return true;
+    if (atomic_load(&steady_on) != 0) return true;
+    if (atomic_load(&trim_x) != 0 || atomic_load(&trim_y) != 0) return true;
     return false;
 }
 
@@ -773,23 +786,31 @@ static inline int32_t physical_deadzone_clean(int32_t v) {
     return v;
 }
 
-static inline void extract_physical_ds5(const uint8_t *buf, int32_t *rx, int32_t *ry) {
-    *rx = physical_deadzone_clean(((int32_t)buf[3] - 128) << 8);
-    *ry = physical_deadzone_clean(((int32_t)buf[4] - 128) << 8);
+// clean_idle: when true, clamp resting noise so it does not sum into mouse
+// injection. When false (accessibility-only / wire path), keep raw axes —
+// PHYSICAL_IDLE_DEADZONE must never soften sticks unless injection is live.
+static inline void extract_physical_ds5(const uint8_t *buf, int32_t *rx, int32_t *ry,
+                                        bool clean_idle) {
+    int32_t x = ((int32_t)buf[3] - 128) << 8;
+    int32_t y = ((int32_t)buf[4] - 128) << 8;
+    *rx = clean_idle ? physical_deadzone_clean(x) : x;
+    *ry = clean_idle ? physical_deadzone_clean(y) : y;
 }
 
-static inline void extract_physical_gip(const uint8_t *gp, int32_t *rx, int32_t *ry) {
+static inline void extract_physical_gip(const uint8_t *gp, int32_t *rx, int32_t *ry,
+                                        bool clean_idle) {
     int16_t r = (int16_t)((uint16_t)gp[10] | ((uint16_t)gp[11] << 8));
     int16_t y = (int16_t)((uint16_t)gp[12] | ((uint16_t)gp[13] << 8));
-    *rx = physical_deadzone_clean((int32_t)r);
-    *ry = physical_deadzone_clean((int32_t)-y);
+    *rx = clean_idle ? physical_deadzone_clean((int32_t)r) : (int32_t)r;
+    *ry = clean_idle ? physical_deadzone_clean((int32_t)-y) : (int32_t)-y;
 }
 
-static inline void extract_physical_xinput(const uint8_t *buf, int32_t *rx, int32_t *ry) {
+static inline void extract_physical_xinput(const uint8_t *buf, int32_t *rx, int32_t *ry,
+                                           bool clean_idle) {
     int16_t r = (int16_t)((uint16_t)buf[10] | ((uint16_t)buf[11] << 8));
     int16_t y = (int16_t)((uint16_t)buf[12] | ((uint16_t)buf[13] << 8));
-    *rx = physical_deadzone_clean((int32_t)r);
-    *ry = physical_deadzone_clean((int32_t)-y);
+    *rx = clean_idle ? physical_deadzone_clean((int32_t)r) : (int32_t)r;
+    *ry = clean_idle ? physical_deadzone_clean((int32_t)-y) : (int32_t)-y;
 }
 
 static inline int16_t rd_s16(const uint8_t *p) {
@@ -857,6 +878,13 @@ void km_apply(uint8_t ep_addr, uint8_t *buf, uint16_t len) {
                        ep_addr, (unsigned)len, hex);
     }
 #endif
+    // Wire-perfect guard: when km injection and accessibility filters are
+    // all OFF, leave the report bytes untouched. Previously we still ran
+    // extract→deadzone→apply whenever either stick axis exceeded the idle
+    // deadzone, which hard-zeroed the soft axis and added soft/off feel.
+    const bool modify = km_wants_report_modify();
+    const bool inj_live = km_has_active_injection();
+
     // GIP (Xbox One / Scuf / PowerA / Elite / GameSir) — IN EP 0x82, cmd 0x20 after 4B GIP header
     if (ep_addr == 0x82 && len >= 20 && buf[0] == 0x20) {
         const uint8_t *gp = buf + 4;
@@ -865,8 +893,9 @@ void km_apply(uint8_t ep_addr, uint8_t *buf, uint16_t len) {
         atomic_store(&tel_rx, (int32_t)rd_s16(gp + 10));
         atomic_store(&tel_ry, (int32_t)-rd_s16(gp + 12));
         atomic_store(&tel_btn, (uint32_t)((uint16_t)gp[0] | ((uint16_t)gp[1] << 8)));
+        if (!modify) return;   // passthrough: telem only
         int32_t px, py, ix, iy;
-        extract_physical_gip(gp, &px, &py);
+        extract_physical_gip(gp, &px, &py, /*clean_idle=*/inj_live);
         int32_t tx = atomic_load(&trim_x), ty = atomic_load(&trim_y);
         px += tx; py += ty;
         bool steady = atomic_load(&steady_on) != 0;
@@ -895,8 +924,9 @@ void km_apply(uint8_t ep_addr, uint8_t *buf, uint16_t len) {
         atomic_store(&tel_rx, (int32_t)rd_s16(buf + 10));
         atomic_store(&tel_ry, (int32_t)-rd_s16(buf + 12));
         atomic_store(&tel_btn, (uint32_t)((uint16_t)buf[2] | ((uint16_t)buf[3] << 8)));
+        if (!modify) return;   // passthrough: telem only
         int32_t px, py, ix, iy;
-        extract_physical_xinput(buf, &px, &py);
+        extract_physical_xinput(buf, &px, &py, /*clean_idle=*/inj_live);
         int32_t tx = atomic_load(&trim_x), ty = atomic_load(&trim_y);
         px += tx; py += ty;
         bool steady = atomic_load(&steady_on) != 0;
@@ -924,8 +954,9 @@ void km_apply(uint8_t ep_addr, uint8_t *buf, uint16_t len) {
         atomic_store(&tel_rx, ((int32_t)buf[3] - 128) << 8);
         atomic_store(&tel_ry, ((int32_t)buf[4] - 128) << 8);
         atomic_store(&tel_btn, (uint32_t)((uint16_t)buf[8] | ((uint16_t)buf[9] << 8)));
+        if (!modify) return;   // passthrough: telem only
         int32_t px, py, ix, iy;
-        extract_physical_ds5(buf, &px, &py);
+        extract_physical_ds5(buf, &px, &py, /*clean_idle=*/inj_live);
         int32_t tx = atomic_load(&trim_x), ty = atomic_load(&trim_y);
         px += tx; py += ty;
         bool steady = atomic_load(&steady_on) != 0;

@@ -1,8 +1,9 @@
 // PassUsbHost — stripped ESP-IDF usb_host wrapper for the passthrough.
 // Enumerates the attached device, snapshots descriptors, opens IN/OUT
 // endpoints, and forwards every URB to hooks exported by main.cpp (which
-// frame and ship them over IPC to Left). No HID decoding, no GIP
-// handshake generation — passes the wire data through unchanged.
+// frame and ship them over IPC to Left). No HID decoding. Input reports
+// pass wire-unchanged; a minimal GIP kickstart is sent only while the
+// controller is stuck announcing (before the first 0x20 input report).
 
 #pragma once
 
@@ -63,9 +64,10 @@ private:
     // (Xbox One) controllers stay stuck re-announcing and never report input.
     // On seeing the announce (cmd 0x02) we send identify + power-on so the
     // controller transitions to streaming input reports (cmd 0x20).
-    uint8_t  gip_out_ep_    = 0x02;   // interrupt OUT ep, learned from descriptors
-    uint8_t  gip_seq_       = 1;      // GIP sequence, non-zero, increments
-    bool     gip_got_input_ = false;  // true once a real 0x20 input report seen
+    uint8_t  gip_out_ep_       = 0x02;   // interrupt OUT ep, learned from descriptors
+    uint8_t  gip_seq_          = 1;      // GIP sequence, non-zero, increments
+    bool     gip_got_input_    = false;  // true once a real 0x20 input report seen
+    uint32_t gip_last_kick_ms_ = 0;      // rate-limit kickstart spam
     void gip_send(uint8_t cmd, uint8_t options, const uint8_t *payload, uint8_t plen);
     void gip_kickstart();
 

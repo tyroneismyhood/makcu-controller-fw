@@ -114,8 +114,9 @@ void PassUsbHost::on_new_device(uint8_t address) {
     ESP_LOGI(TAG, "NEW_DEV addr=%u", address);
     R_LOG("NEW_DEV addr=%u", address);
     device_connected_ = true;
-    gip_got_input_ = false;   // re-arm GIP handshake for this device
-    gip_seq_       = 1;
+    gip_got_input_    = false;   // re-arm GIP handshake for this device
+    gip_seq_          = 1;
+    gip_last_kick_ms_ = 0;
     diag_on_new_dev(address);
 
     esp_err_t err = usb_host_device_open(client_handle_, address, &device_handle_);
@@ -349,7 +350,15 @@ void PassUsbHost::in_xfer_complete(usb_transfer_t *t) {
         if (b0 == 0x20) {
             self->gip_got_input_ = true;
         } else if (b0 == 0x02 && !self->gip_got_input_) {
-            self->gip_kickstart();
+            // Rate-limit kickstart: announce repeats ~every 500 ms. Spamming
+            // identify/power/LED on every announce steals OUT/IN bandwidth
+            // during bring-up and can delay the first real input report.
+            uint32_t now_ms = millis();
+            if (self->gip_last_kick_ms_ == 0 ||
+                (now_ms - self->gip_last_kick_ms_) >= 400) {
+                self->gip_last_kick_ms_ = now_ms;
+                self->gip_kickstart();
+            }
         }
         ipc_send(FRAME_EP_IN, t->bEndpointAddress, 0,
                  t->data_buffer, (uint16_t)t->actual_num_bytes);

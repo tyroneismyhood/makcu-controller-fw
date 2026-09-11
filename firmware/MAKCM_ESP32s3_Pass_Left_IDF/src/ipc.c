@@ -10,6 +10,7 @@
 #include "driver/uart.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "pass_ipc.h"
 
 #define IPC_UART_PORT     UART_NUM_1
@@ -107,12 +108,25 @@ static void ipc_feed(uint8_t b) {
 static void ipc_rx_task(void *arg) {
     (void)arg;
     uint8_t chunk[256];
+    // Mid-frame inactivity watchdog (matches Right ipc_pump_serial): a
+    // dropped byte at 5 Mbps can wedge the state machine and silently
+    // discard every subsequent EP_IN until magic resync by chance.
+    int64_t last_byte_us = 0;
     for (;;) {
         // 1-tick literal timeout (at 1 kHz tick = 1 ms). pdMS_TO_TICKS(1)
         // would round down to 0 ticks at the legacy 100 Hz default — a
         // non-blocking spin that starved TinyUSB during enum bursts.
         int n = uart_read_bytes(IPC_UART_PORT, chunk, sizeof(chunk), 1);
-        for (int i = 0; i < n; ++i) ipc_feed(chunk[i]);
+        if (n > 0) {
+            for (int i = 0; i < n; ++i) ipc_feed(chunk[i]);
+            last_byte_us = esp_timer_get_time();
+        } else if (rx_state != S_WAIT_MAGIC0 && last_byte_us != 0) {
+            int64_t idle_us = esp_timer_get_time() - last_byte_us;
+            if (idle_us > 10000) {  // 10 ms — same threshold as Right
+                rx_state = S_WAIT_MAGIC0;
+                last_byte_us = 0;
+            }
+        }
     }
 }
 

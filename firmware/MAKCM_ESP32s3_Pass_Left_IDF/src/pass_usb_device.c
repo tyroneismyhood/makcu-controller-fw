@@ -463,6 +463,8 @@ static bool submit_in_core(uint8_t ep_addr, const uint8_t *data, uint16_t len, b
 #endif
     // km_apply on a stack scratch so we never touch shared buffers under
     // contention without the lock. 64 B = FS max-packet-size cap.
+    // When injection + accessibility are OFF, km_apply is telem-only and
+    // leaves scratch byte-identical to `data` (wire-perfect passthrough).
     uint8_t scratch[64];
     if (len > sizeof(scratch)) len = sizeof(scratch);
     memcpy(scratch, data, len);
@@ -535,11 +537,17 @@ bool pass_usb_submit_in(uint8_t ep_addr, const uint8_t *data, uint16_t len) {
     return submit_in_core(ep_addr, data, len, /*is_synth=*/false);
 }
 
-// Synthesis timer. If any km injection is active AND it's been > SYNTH_GAP_MS
-// since the last real report on a given IN EP, re-submit the cached template
-// (km_apply overlays the injected stick + buttons). GIP controllers only
-// emit on change — without this a brief injection window falls between
-// real reports and Windows never sees the override.
+// Synthesis timer — INJECTION ONLY.
+// If any km injection is active AND it's been > SYNTH_GAP_MS since the last
+// real report on a given IN EP, re-submit the cached template (km_apply
+// overlays the injected stick + buttons). GIP controllers only emit on
+// change — without this a brief injection window falls between real
+// reports and Windows never sees the override.
+//
+// CRITICAL for wire-perfect passthrough: when km_has_active_injection() is
+// false we must not synthesize. Accessibility filters (steady/trim) also
+// must not arm this path — they run on real reports only so report rate
+// and cadence stay identical to a direct wired controller.
 //
 // Falling-edge tracking emits one final synth frame on the
 // active→inactive transition so a clean release lands on the host (e.g.
@@ -555,10 +563,11 @@ static void synth_cb(void *arg) {
         prev_active = false;
         return;
     }
+    // Injection-only gate — do not key off accessibility filters.
     bool now_active   = km_has_active_injection();
     bool falling_edge = prev_active && !now_active;
     prev_active       = now_active;
-    if (!now_active && !falling_edge) return;
+    if (!now_active && !falling_edge) return;  // pure passthrough: no synth
     int64_t now = esp_timer_get_time();
     for (uint8_t i = 0; i < open_ep_count; ++i) {
         OpenEp *slot = &open_eps[i];
