@@ -142,3 +142,12 @@ soft_makcu/
 docs/SOFT_MAKCU.md     # this file
 README.md              # home checklist
 ```
+
+---
+
+## In-game playbook
+
+The home checklist (success / over / short + what to send Xim) lives in the
+root [README.md](../README.md). Soft Lab never opens the game — tune totals
+here, prove 360s in Warzone at look **2** / aim **1.50**, then send the
+export JSON + `success|over|short` note.
