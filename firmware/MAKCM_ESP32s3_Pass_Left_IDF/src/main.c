@@ -32,6 +32,7 @@ void km_ingest_raw(const uint8_t *payload, uint16_t len);
 void km_apply(uint8_t ep_addr, uint8_t *buf, uint16_t len);
 void km_init(void);
 void km_reset_injection(void);
+void km_set_controller_identity(uint16_t vid, uint16_t pid);
 
 extern int km_uart_write(const void *data, size_t len);
 
@@ -173,6 +174,8 @@ void ipc_handle_frame(uint8_t type, uint8_t ep_addr, uint16_t seq,
         if (len == 18) {
             memcpy(&desc_device, payload, 18);
             desc_device_valid = true;
+            km_set_controller_identity(desc_device.idVendor,
+                                       desc_device.idProduct);
             poke_main = true;
         }
         break;
@@ -265,11 +268,12 @@ static void main_task(void *arg) {
             if (host_visible) {
                 km_uart_write("[L] DEVICE_GONE — disconnect\n", 30);
                 pass_usb_disconnect();
-                km_reset_injection();
                 host_visible = false;
             } else {
                 ESP_LOGW(TAG, "DEVICE_GONE while not visible to host");
             }
+            km_reset_injection();
+            km_set_controller_identity(0, 0);
             // Re-arm staging so next FRAME_DESC_* / FRAME_DEVICE_READY
             // cycle has to repopulate before reconnect fires. usb_started
             // stays true — only the D+ pull-up was dropped.

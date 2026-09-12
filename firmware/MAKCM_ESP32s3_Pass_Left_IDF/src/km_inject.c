@@ -8,9 +8,9 @@
 // next drain produces zero → stick returns to neutral with zero overshoot.
 // No decay, no carryover, no rate-limit.
 //
-// km.moveto / km.aim_mode / smooth-move (km.move with duration > 0) are
-// NOT supported. km.move_auto / km.move_bezier collapse to the same
-// accumulator path as km.move (duration / path args ignored).
+// Official km.move / V2 move deltas enter the same bounded accumulator.
+// The host protocol parser rejects commands this controller bridge does not
+// implement instead of exposing private extensions.
 //
 // km_apply() runs on every outgoing IN report:
 //   1. extract physical right stick from the real device (mouse convention,
@@ -37,6 +37,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_timer.h"
+#include "km_host_api.h"
+#include "km_pad_translate.h"
 
 extern int km_uart_write(const void *data, size_t len);
 extern int km_uart_write_raw(const void *data, size_t len);  // never gated by COM3_LOG
@@ -239,67 +241,22 @@ static _Atomic uint32_t click_release_ms = 0;
 // canonical idle signal for KM_IDLE_HOUSEKEEP_MS.
 static _Atomic uint32_t km_last_cmd_ms = 0;
 
-// --- Accessibility: tremor-damp "steady" filter (RIGHT / aim stick) --------
-// Off by default; every parameter tunable LIVE over the KM UART so you dial
-// it to your own tremor without reflashing:
-//   km.steady(1|0)   enable / disable the filter
-//   km.steady_a(N)   smoothing 0..99 (EMA weight of history; higher = smoother
-//                    but laggier). ~70 is a sane start.
-//   km.steady_d(N)   deadzone 0..32000. Shake below N reads as center; output
-//                    is rescaled above N so you keep full stick reach.
-// A low-pass (exponential moving average) averages the stick across frames so
-// fast shake is damped while intentional motion survives; the deadzone kills
-// residual jitter around center.
-static _Atomic uint32_t steady_on    = 0;
-static _Atomic int32_t  steady_alpha = 70;
-static _Atomic int32_t  steady_dead  = 6000;
-static int32_t steady_fx = 0;   // EMA memory, right-stick X (km_state_lock)
-static int32_t steady_fy = 0;   // EMA memory, right-stick Y
+static _Atomic uint32_t controller_kind = 0;
 
-// --- Accessibility: constant right-stick trim (drift cancel / gentle pull) --
-//   km.trim(x,y)   add a constant offset to the right stick. To cancel a
-//                  resting drift, set the trim OPPOSITE the drift (the monitor
-//                  reports resting mean → use its negative). Range ±32767.
-// Applied before the steady filter, so a re-centered stick is then smoothed.
-static _Atomic int32_t trim_x = 0;
-static _Atomic int32_t trim_y = 0;
+enum {
+    CONTROLLER_OTHER = 0,
+    CONTROLLER_DS4,
+    CONTROLLER_DS5,
+};
 
-// --- Live telemetry: physical sticks + buttons out the KM UART -------------
-// km.telem(1|0) toggles it. Emitted from the 8 ms housekeep timer (NOT the
-// USB callback — km_uart_write_raw blocks, so it must never run there) so it
-// can't stall the USB pipe. ASCII line format:
-//   KMS lx=<i> ly=<i> rx=<i> ry=<i> b=<hex>\n
-// Values are RAW physical (pre-deadzone) so a monitor can measure true shake.
-#ifndef KM_TELEM
-#define KM_TELEM 0
-#endif
-static _Atomic uint32_t telem_on = KM_TELEM;
-
-// Official MAKCU km.buttons() stream — physical pad → mouse button mask for
-// the communicator PC (https://makcu.com/en/api/). Softwares call
-// km.buttons(1) then listen for "km." + 1 raw mask byte on this UART.
-// Mapping (matches existing km.left/right inject aliases):
-//   bit0 left   ← physical RT / fire
-//   bit1 right  ← physical LT / ADS
-//   bit2 middle ← injected middle / X
-//   bit3 ms1    ← LB
-//   bit4 ms2    ← RB
-static _Atomic uint32_t buttons_stream_on = 0;
-static _Atomic uint32_t buttons_last_mask = 0x100; // force first emit after enable
-
-static uint8_t makcu_button_mask(void);
-static void makcu_buttons_emit(uint8_t mask);
-static void makcu_buttons_poll(void);
-static inline uint16_t current_buttons(void);
-
-
-static _Atomic int32_t  tel_lx = 0, tel_ly = 0, tel_rx = 0, tel_ry = 0;
-static _Atomic uint32_t tel_btn = 0;
-// Diagnostic: does km_apply even run, and what report does it see?
-static _Atomic uint32_t tel_calls = 0;   // km_apply call count
-static _Atomic uint32_t tel_ep = 0;      // last ep_addr
-static _Atomic uint32_t tel_b0 = 0;      // last report first byte
-static _Atomic uint32_t tel_len = 0;     // last report length
+void km_set_controller_identity(uint16_t vid, uint16_t pid) {
+    uint32_t kind = CONTROLLER_OTHER;
+    if (vid == 0x054C) {
+        if (pid == 0x05C4 || pid == 0x09CC) kind = CONTROLLER_DS4;
+        else if (pid == 0x0CE6 || pid == 0x0DF2) kind = CONTROLLER_DS5;
+    }
+    atomic_store(&controller_kind, kind);
+}
 
 // Generic button bits — protocol adapters map these to native positions.
 #define BTN_A      0x0001  // face bottom (A / Cross / South)
@@ -378,15 +335,12 @@ void km_reset_injection(void) {
     ry_physical   = 0;
     g_vel_accum_x = 0;
     g_vel_accum_y = 0;
-    steady_fx     = 0;
-    steady_fy     = 0;
     portEXIT_CRITICAL(&km_state_lock);
-    atomic_store(&trim_x, 0);
-    atomic_store(&trim_y, 0);
     atomic_store(&btn_held, 0);
     atomic_store(&btn_click, 0);
     atomic_store(&click_release_ms, 0);
     atomic_store(&km_last_cmd_ms, 0);
+    km_host_api_set_pad_online(false);
 }
 
 // Active = non-zero injected stick OR any held/click button. Used by
@@ -504,30 +458,6 @@ static void km_housekeep_cb(void *arg) {
         }
     }
 
-    // --- Steady telemetry emit. Safe here: km_housekeep_cb runs in the
-    // esp_timer task, not the USB callback, so a blocking km_uart_write_raw
-    // can't stall the USB pipe. ~62 Hz (every 2nd 8 ms tick) — enough to
-    // sample a 4–12 Hz tremor.
-    // Official MAKCU button stream for the communicator PC.
-    makcu_buttons_poll();
-
-    if (atomic_load(&telem_on)) {
-        static uint32_t tel_div = 0;
-        if (++tel_div >= 2) {
-            tel_div = 0;
-            char m[128];
-            int n = snprintf(m, sizeof(m),
-                "KMS lx=%ld ly=%ld rx=%ld ry=%ld b=%04x n=%lu ep=%02x b0=%02x len=%lu\n",
-                (long)atomic_load(&tel_lx), (long)atomic_load(&tel_ly),
-                (long)atomic_load(&tel_rx), (long)atomic_load(&tel_ry),
-                (unsigned)atomic_load(&tel_btn),
-                (unsigned long)atomic_load(&tel_calls),
-                (unsigned)atomic_load(&tel_ep),
-                (unsigned)atomic_load(&tel_b0),
-                (unsigned long)atomic_load(&tel_len));
-            if (n > 0) km_uart_write_raw(m, n);
-        }
-    }
 }
 
 static void btn_hold(uint16_t mask, bool on) {
@@ -543,222 +473,8 @@ static inline uint16_t current_buttons(void) {
     return (uint16_t)(atomic_load(&btn_held) | atomic_load(&btn_click));
 }
 
-// ---------------------------------------------------------------------------
-//  Text parser. Supported commands (one ASCII line each, null-terminated):
-//    km.version()                — handshake, kmbox identification response
-//    km.move(dx,dy)              — mouse delta (accumulator)
-//    km.move_auto(dx,dy,t)       — same as move (duration ignored)
-//    km.move_bezier(...)         — same as move (path ignored, dx/dy summed)
-//    km.click(btn[,cnt])         — btn 0=L(RT/fire), 1=R(LT/ADS), 2=M(X-btn)
-//    km.left(0|1) / km.right(0|1) / km.middle(0|1)
-//    km.btnA/B/X/Y(0|1)
-//    km.lb(0|1) / km.rb(0|1)
-//  Unsupported (silently ignored): km.moveto, km.aim_mode, smooth-move.
-// ---------------------------------------------------------------------------
-static bool str_starts(const char *s, size_t len, const char *pfx) {
-    size_t n = strlen(pfx);
-    return len >= n && memcmp(s, pfx, n) == 0;
-}
-
-
-#define MAKCU_BTN_LEFT    0x01
-#define MAKCU_BTN_RIGHT   0x02
-#define MAKCU_BTN_MIDDLE  0x04
-#define MAKCU_BTN_MS1     0x08
-#define MAKCU_BTN_MS2     0x10
-#define TRIG_DOWN_THRESH  64   // of 0..1023 — treat as pressed for activation keys
-
-static void km_prompt(void) {
-    km_uart_write_raw(">>> ", 4);
-}
-
-static void km_reply_01(int on) {
-    km_uart_write_raw(on ? "1\r\n>>> " : "0\r\n>>> ", 7);
-}
-
-// Build official MAKCU mouse-button mask from physical pad + inject holds.
-static uint8_t makcu_button_mask(void) {
-    uint8_t m = 0;
-    if (atomic_load(&tel_rt) >= TRIG_DOWN_THRESH) m |= MAKCU_BTN_LEFT;
-    if (atomic_load(&tel_lt) >= TRIG_DOWN_THRESH) m |= MAKCU_BTN_RIGHT;
-    uint16_t gen = current_buttons();
-    if (gen & BTN_FIRE) m |= MAKCU_BTN_LEFT;
-    if (gen & BTN_ADS)  m |= MAKCU_BTN_RIGHT;
-    if (gen & BTN_X)    m |= MAKCU_BTN_MIDDLE;
-    if (gen & BTN_LB)   m |= MAKCU_BTN_MS1;
-    if (gen & BTN_RB)   m |= MAKCU_BTN_MS2;
-    return m;
-}
-
-static void makcu_buttons_emit(uint8_t mask) {
-    // Wire format verified by makcu-rs/discovery: literal "km." + raw mask byte.
-    uint8_t frame[4] = { 'k', 'm', '.', mask };
-    km_uart_write_raw(frame, 4);
-    atomic_store(&buttons_last_mask, mask);
-}
-
-static void makcu_buttons_poll(void) {
-    if (!atomic_load(&buttons_stream_on)) return;
-    uint8_t mask = makcu_button_mask();
-    uint32_t last = atomic_load(&buttons_last_mask);
-    if (mask != (uint8_t)last) {
-        makcu_buttons_emit(mask);
-    }
-}
-
 static void parse_km_text(const char *line, uint16_t len) {
-    char buf[96];
-    uint16_t n = len < sizeof(buf) - 1 ? len : sizeof(buf) - 1;
-    memcpy(buf, line, n); buf[n] = 0;
-
-    // km.version() — mimic the original kmbox B/B+ firmware's identification
-    // line. _raw bypasses the COM3_LOG gate so handshake works in quiet builds.
-    if (str_starts(buf, n, "km.version(")) {
-        static const char kResp[] =
-            "kmbox:   1.0.0 " __DATE__ " " __TIME__ "\r\n>>> ";
-        km_uart_write_raw(kResp, sizeof(kResp) - 1);
-        return;
-    }
-
-    // Official MAKCU button stream (communicator activation keys).
-    // km.buttons(1) enable / km.buttons(0) disable / km.buttons() query.
-    if (str_starts(buf, n, "km.buttons(") || str_starts(buf, n, ".buttons(")) {
-        const char *a = strchr(buf, '(');
-        if (!a) { km_prompt(); return; }
-        a++;
-        // empty args → query enabled
-        if (*a == ')') {
-            km_reply_01(atomic_load(&buttons_stream_on) != 0);
-            return;
-        }
-        int mode = 0;
-        sscanf(a, "%d", &mode);
-        if (mode) {
-            atomic_store(&buttons_stream_on, 1);
-            atomic_store(&buttons_last_mask, 0x100); // force emit
-            makcu_buttons_emit(makcu_button_mask());
-        } else {
-            atomic_store(&buttons_stream_on, 0);
-        }
-        km_prompt();
-        return;
-    }
-
-    // Official button state queries: km.left() → 0|1 (physical RT / fire).
-    // Must run BEFORE km.left(1)/km.left(0) inject handlers.
-    if (str_starts(buf, n, "km.left()") || str_starts(buf, n, ".left()")) {
-        km_reply_01(makcu_button_mask() & MAKCU_BTN_LEFT);
-        return;
-    }
-    if (str_starts(buf, n, "km.right()") || str_starts(buf, n, ".right()")) {
-        km_reply_01(makcu_button_mask() & MAKCU_BTN_RIGHT);
-        return;
-    }
-    if (str_starts(buf, n, "km.middle()") || str_starts(buf, n, ".middle()")) {
-        km_reply_01(makcu_button_mask() & MAKCU_BTN_MIDDLE);
-        return;
-    }
-    if (str_starts(buf, n, "km.ms1()") || str_starts(buf, n, ".ms1()")) {
-        km_reply_01(makcu_button_mask() & MAKCU_BTN_MS1);
-        return;
-    }
-    if (str_starts(buf, n, "km.ms2()") || str_starts(buf, n, ".ms2()")) {
-        km_reply_01(makcu_button_mask() & MAKCU_BTN_MS2);
-        return;
-    }
-    // Accessibility: steady (tremor-damp) filter + telemetry toggles.
-    if (str_starts(buf, n, "km.steady_a(")) {
-        int v = 70; sscanf(buf + 12, "%d", &v);
-        if (v < 0) v = 0;
-        if (v > 99) v = 99;
-        atomic_store(&steady_alpha, v); return;
-    }
-    if (str_starts(buf, n, "km.steady_d(")) {
-        int v = 0; sscanf(buf + 12, "%d", &v);
-        if (v < 0) v = 0;
-        if (v > 32000) v = 32000;
-        atomic_store(&steady_dead, v); return;
-    }
-    if (str_starts(buf, n, "km.steady(")) {
-        int v = 0; sscanf(buf + 10, "%d", &v);
-        atomic_store(&steady_on, v ? 1 : 0); return;
-    }
-    if (str_starts(buf, n, "km.telem(")) {
-        int v = 0; sscanf(buf + 9, "%d", &v);
-        atomic_store(&telem_on, v ? 1 : 0); return;
-    }
-    if (str_starts(buf, n, "km.trim(")) {
-        const char *a = strchr(buf, '('); if (!a) return; a++;
-        char *e; long x = strtol(a, &e, 10); if (e == a) return;
-        while (*e == ' ' || *e == ',' || *e == '\t') e++;
-        long y = strtol(e, &e, 10);
-        if (x < -32767) x = -32767;
-        if (x > 32767) x = 32767;
-        if (y < -32767) y = -32767;
-        if (y > 32767) y = 32767;
-        atomic_store(&trim_x, (int32_t)x);
-        atomic_store(&trim_y, (int32_t)y);
-        return;
-    }
-
-    if (str_starts(buf, n, "km.move(") ||
-        str_starts(buf, n, "km.move_auto(") ||
-        str_starts(buf, n, "km.move_bezier(")) {
-#if KM_DIAG
-        if (buf[7] == '(')       atomic_fetch_add(&km_cnt_move, 1);
-        else if (buf[8] == 'a')  atomic_fetch_add(&km_cnt_mvauto, 1);
-        else                      atomic_fetch_add(&km_cnt_mvbez, 1);
-#endif
-        const char *args = strchr(buf, '(');
-        if (!args) return;
-        args++;
-        char *endp;
-        long x = strtol(args, &endp, 10);
-        if (endp == args) return;
-        while (*endp == ' ' || *endp == ',' || *endp == '\t') endp++;
-        long y = strtol(endp, &endp, 10);
-#if KM_RING
-        km_ring_mark_active();
-        uint32_t tms = (uint32_t)(esp_timer_get_time() / 1000);
-        char kind = (buf[7] == '(') ? 'M' : (buf[8] == 'a') ? 'A' : 'B';
-        km_ring_printf("T%u %c %ld,%ld\n", (unsigned)tms, kind, x, y);
-#endif
-        applyMouseDelta((int)x, (int)y);
-        return;
-    }
-
-    if (str_starts(buf, n, "km.click(")) {
-        int btn = 0;
-        sscanf(buf + 9, "%d", &btn);
-#if KM_DIAG
-        atomic_fetch_add(&km_cnt_click, 1);
-#endif
-        switch (btn) {
-            case 0: btn_pulse(BTN_FIRE); break;
-            case 1: btn_pulse(BTN_ADS);  break;
-            case 2: btn_pulse(BTN_X);    break;
-        }
-        return;
-    }
-    if (str_starts(buf, n, "km.left(1"))   { btn_hold(BTN_FIRE, true);  return; }
-    if (str_starts(buf, n, "km.left(0"))   { btn_hold(BTN_FIRE, false); return; }
-    if (str_starts(buf, n, "km.right(1"))  { btn_hold(BTN_ADS, true);   return; }
-    if (str_starts(buf, n, "km.right(0"))  { btn_hold(BTN_ADS, false);  return; }
-    if (str_starts(buf, n, "km.middle(1")) { btn_hold(BTN_X, true);     return; }
-    if (str_starts(buf, n, "km.middle(0")) { btn_hold(BTN_X, false);    return; }
-
-    if (str_starts(buf, n, "km.btnA(1")) { btn_hold(BTN_A, true);  return; }
-    if (str_starts(buf, n, "km.btnA(0")) { btn_hold(BTN_A, false); return; }
-    if (str_starts(buf, n, "km.btnB(1")) { btn_hold(BTN_B, true);  return; }
-    if (str_starts(buf, n, "km.btnB(0")) { btn_hold(BTN_B, false); return; }
-    if (str_starts(buf, n, "km.btnX(1")) { btn_hold(BTN_X, true);  return; }
-    if (str_starts(buf, n, "km.btnX(0")) { btn_hold(BTN_X, false); return; }
-    if (str_starts(buf, n, "km.btnY(1")) { btn_hold(BTN_Y, true);  return; }
-    if (str_starts(buf, n, "km.btnY(0")) { btn_hold(BTN_Y, false); return; }
-    if (str_starts(buf, n, "km.lb(1"))   { btn_hold(BTN_LB, true); return; }
-    if (str_starts(buf, n, "km.lb(0"))   { btn_hold(BTN_LB, false);return; }
-    if (str_starts(buf, n, "km.rb(1"))   { btn_hold(BTN_RB, true); return; }
-    if (str_starts(buf, n, "km.rb(0"))   { btn_hold(BTN_RB, false);return; }
+    (void)km_host_api_handle_legacy(line, len);
 }
 
 void km_ingest_raw(const uint8_t *payload, uint16_t len) {
@@ -777,6 +493,56 @@ void km_ingest_raw(const uint8_t *payload, uint16_t len) {
     if (payload[0] >= 0x20 && payload[0] < 0x7F) {
         parse_km_text((const char *)payload, len);
     }
+}
+
+void km_ingest_v2(uint8_t cmd, const uint8_t *payload, uint16_t len) {
+    atomic_store(&km_last_cmd_ms, (uint32_t)(esp_timer_get_time() / 1000));
+    km_host_api_handle_v2(cmd, payload, len);
+}
+
+void km_api_move(int32_t dx, int32_t dy) {
+    if (dx < -32767) dx = -32767;
+    if (dx > 32767) dx = 32767;
+    if (dy < -32767) dy = -32767;
+    if (dy > 32767) dy = 32767;
+    applyMouseDelta((int)dx, (int)dy);
+}
+
+static uint16_t api_button_mask(uint8_t button) {
+    switch (button) {
+    case 1: return BTN_FIRE;  // left mouse -> RT
+    case 2: return BTN_ADS;   // right mouse -> LT
+    case 3: return BTN_X;
+    case 4: return BTN_LB;
+    case 5: return BTN_RB;
+    default: return 0;
+    }
+}
+
+void km_api_set_button(uint8_t button, uint8_t state) {
+    uint16_t mask = api_button_mask(button);
+    if (!mask) return;
+    if (state == 3) btn_pulse(mask);
+    else btn_hold(mask, state == 1);
+}
+
+void km_api_set_click(uint8_t button, bool pressed) {
+    uint16_t mask = api_button_mask(button);
+    if (!mask) return;
+    if (pressed) atomic_fetch_or(&btn_click, mask);
+    else atomic_fetch_and(&btn_click, (uint16_t)~mask);
+    atomic_store(&click_release_ms, 0);
+}
+
+uint8_t km_api_injected_button_mask(void) {
+    uint16_t buttons = current_buttons();
+    uint8_t mask = 0;
+    if (buttons & BTN_FIRE) mask |= 0x01;
+    if (buttons & BTN_ADS)  mask |= 0x02;
+    if (buttons & BTN_X)    mask |= 0x04;
+    if (buttons & BTN_LB)   mask |= 0x08;
+    if (buttons & BTN_RB)   mask |= 0x10;
+    return mask;
 }
 
 // ---------------------------------------------------------------------------
@@ -852,7 +618,7 @@ static void apply_xinput(uint8_t *buf, uint16_t len, int16_t mrx, int16_t mry, u
     if (gen_btn & BTN_ADS)  buf[4] = 0xFF;
 }
 
-// DS4 / DS5 — Linux hid-playstation byte layout.
+// DualSense USB report layout.
 #define DS5_BTN_SQUARE   0x10  // byte 8 upper nibble
 #define DS5_BTN_CROSS    0x20
 #define DS5_BTN_CIRCLE   0x40
@@ -877,6 +643,22 @@ static void apply_ds5(uint8_t *buf, uint16_t len, int16_t mrx, int16_t mry, uint
     buf[9] |= shoulder;
     if (gen_btn & BTN_FIRE) buf[6] = 0xFF;   // R2
     if (gen_btn & BTN_ADS)  buf[5] = 0xFF;   // L2
+}
+
+// DualShock 4 USB report layout.
+static void apply_ds4(uint8_t *buf, uint16_t len, int16_t mrx, int16_t mry,
+                      uint16_t gen_btn) {
+    if (len < 10 || buf[0] != 0x01) return;
+    buf[3] = s16_to_u8(mrx);
+    buf[4] = s16_to_u8(mry);
+    if (gen_btn & BTN_A) buf[5] |= 0x20;  // Cross
+    if (gen_btn & BTN_B) buf[5] |= 0x40;  // Circle
+    if (gen_btn & BTN_X) buf[5] |= 0x10;  // Square
+    if (gen_btn & BTN_Y) buf[5] |= 0x80;  // Triangle
+    if (gen_btn & BTN_LB) buf[6] |= 0x01;
+    if (gen_btn & BTN_RB) buf[6] |= 0x02;
+    if (gen_btn & BTN_ADS)  buf[8] = 0xFF;  // L2
+    if (gen_btn & BTN_FIRE) buf[9] = 0xFF;  // R2
 }
 
 // Physical-stick extractors — read the real controller's right stick
@@ -910,39 +692,9 @@ static inline int16_t rd_s16(const uint8_t *p) {
     return (int16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
 }
 
-// Per-axis scaled deadzone: |v| <= dz → 0, else rescaled to full range so
-// reach isn't lost above the threshold.
-static inline int32_t steady_dz(int32_t v, int32_t dz) {
-    if (dz <= 0) return v;
-    int32_t a = v < 0 ? -v : v;
-    if (a <= dz) return 0;
-    int32_t out = (int32_t)((int64_t)(a - dz) * 32767 / (32767 - dz));
-    return v < 0 ? -out : out;
-}
-
-// EMA low-pass + deadzone on the right stick. Called from km_apply before the
-// blend, so steady damping composes with (and precedes) any km injection.
-static void steady_apply(int32_t *rx, int32_t *ry) {
-    int32_t a = atomic_load(&steady_alpha);
-    int32_t d = atomic_load(&steady_dead);
-    portENTER_CRITICAL(&km_state_lock);
-    steady_fx = (a * steady_fx + (100 - a) * (*rx)) / 100;
-    steady_fy = (a * steady_fy + (100 - a) * (*ry)) / 100;
-    int32_t fx = steady_fx, fy = steady_fy;
-    portEXIT_CRITICAL(&km_state_lock);
-    *rx = steady_dz(fx, d);
-    *ry = steady_dz(fy, d);
-}
-
 // Main entry — called from pass_usb_device.c::pass_usb_submit_in for
 // every outbound IN report (real or synth).
 void km_apply(uint8_t ep_addr, uint8_t *buf, uint16_t len) {
-    // Diagnostic probe — unconditional, before any format check, so we can see
-    // whether km_apply runs at all and what report bytes arrive.
-    atomic_fetch_add(&tel_calls, 1);
-    atomic_store(&tel_ep, ep_addr);
-    atomic_store(&tel_b0, len ? buf[0] : 0);
-    atomic_store(&tel_len, len);
     // Stale-release safety net. If km_housekeep_cb hasn't fired for an
     // unusually long time, STALE_RELEASE_MS guarantees the stick zeros.
     {
@@ -974,18 +726,11 @@ void km_apply(uint8_t ep_addr, uint8_t *buf, uint16_t len) {
     // GIP (Xbox One / Scuf / PowerA / Elite / GameSir) — IN EP 0x82, cmd 0x20 after 4B GIP header
     if (ep_addr == 0x82 && len >= 20 && buf[0] == 0x20) {
         const uint8_t *gp = buf + 4;
-        atomic_store(&tel_lx, (int32_t)rd_s16(gp + 6));
-        atomic_store(&tel_ly, (int32_t)-rd_s16(gp + 8));
-        atomic_store(&tel_rx, (int32_t)rd_s16(gp + 10));
-        atomic_store(&tel_ry, (int32_t)-rd_s16(gp + 12));
-        atomic_store(&tel_btn, (uint32_t)((uint16_t)gp[0] | ((uint16_t)gp[1] << 8)));
+        uint8_t mouse_btn = km_map_gip_buttons(gp);
+        km_host_api_update_pad((int32_t)rd_s16(gp + 10),
+                               (int32_t)-rd_s16(gp + 12), mouse_btn);
         int32_t px, py, ix, iy;
         extract_physical_gip(gp, &px, &py);
-        int32_t tx = atomic_load(&trim_x), ty = atomic_load(&trim_y);
-        px += tx; py += ty;
-        bool steady = atomic_load(&steady_on) != 0;
-        bool force  = steady || tx || ty;
-        if (steady) steady_apply(&px, &py);
         int16_t mrx, mry;
         compute_merged_stick(px, py, &mrx, &mry, &ix, &iy);
         uint16_t gen_btn = current_buttons();
@@ -997,25 +742,18 @@ void km_apply(uint8_t ep_addr, uint8_t *buf, uint16_t len) {
                            (int)mrx, (int)mry);
         }
 #endif
-        if (!force && mrx == 0 && mry == 0 && gen_btn == 0) return;
+        if (ix == 0 && iy == 0 && gen_btn == 0) return;
         apply_gip(buf + 4, len - 4, mrx, mry, gen_btn);
         return;
     }
     // XInput (Xbox 360) — 20-byte report starting 00 14
     if ((ep_addr == 0x81 || ep_addr == 0x82) &&
         len >= 14 && buf[0] == 0x00 && buf[1] == 0x14) {
-        atomic_store(&tel_lx, (int32_t)rd_s16(buf + 6));
-        atomic_store(&tel_ly, (int32_t)-rd_s16(buf + 8));
-        atomic_store(&tel_rx, (int32_t)rd_s16(buf + 10));
-        atomic_store(&tel_ry, (int32_t)-rd_s16(buf + 12));
-        atomic_store(&tel_btn, (uint32_t)((uint16_t)buf[2] | ((uint16_t)buf[3] << 8)));
+        uint8_t mouse_btn = km_map_xinput_buttons(buf);
+        km_host_api_update_pad((int32_t)rd_s16(buf + 10),
+                               (int32_t)-rd_s16(buf + 12), mouse_btn);
         int32_t px, py, ix, iy;
         extract_physical_xinput(buf, &px, &py);
-        int32_t tx = atomic_load(&trim_x), ty = atomic_load(&trim_y);
-        px += tx; py += ty;
-        bool steady = atomic_load(&steady_on) != 0;
-        bool force  = steady || tx || ty;
-        if (steady) steady_apply(&px, &py);
         int16_t mrx, mry;
         compute_merged_stick(px, py, &mrx, &mry, &ix, &iy);
         uint16_t gen_btn = current_buttons();
@@ -1027,24 +765,21 @@ void km_apply(uint8_t ep_addr, uint8_t *buf, uint16_t len) {
                            (int)mrx, (int)mry);
         }
 #endif
-        if (!force && mrx == 0 && mry == 0 && gen_btn == 0) return;
+        if (ix == 0 && iy == 0 && gen_btn == 0) return;
         apply_xinput(buf, len, mrx, mry, gen_btn);
         return;
     }
-    // DS4 / DS5 — 64-byte HID report starting 0x01
-    if (len >= 64 && buf[0] == 0x01) {
-        atomic_store(&tel_lx, ((int32_t)buf[1] - 128) << 8);
-        atomic_store(&tel_ly, ((int32_t)buf[2] - 128) << 8);
-        atomic_store(&tel_rx, ((int32_t)buf[3] - 128) << 8);
-        atomic_store(&tel_ry, ((int32_t)buf[4] - 128) << 8);
-        atomic_store(&tel_btn, (uint32_t)((uint16_t)buf[8] | ((uint16_t)buf[9] << 8)));
+    // Sony wired HID reports. Descriptor VID/PID selects DS4 vs DS5 because
+    // both use report ID 0x01 and 64-byte packets but place buttons/triggers
+    // at different offsets.
+    uint32_t sony_kind = atomic_load(&controller_kind);
+    if (sony_kind != CONTROLLER_OTHER && len >= 64 && buf[0] == 0x01) {
+        uint8_t mouse_btn =
+            km_map_sony_buttons(buf, sony_kind == CONTROLLER_DS4);
+        km_host_api_update_pad(((int32_t)buf[3] - 128) << 8,
+                               ((int32_t)buf[4] - 128) << 8, mouse_btn);
         int32_t px, py, ix, iy;
         extract_physical_ds5(buf, &px, &py);
-        int32_t tx = atomic_load(&trim_x), ty = atomic_load(&trim_y);
-        px += tx; py += ty;
-        bool steady = atomic_load(&steady_on) != 0;
-        bool force  = steady || tx || ty;
-        if (steady) steady_apply(&px, &py);
         int16_t mrx, mry;
         compute_merged_stick(px, py, &mrx, &mry, &ix, &iy);
         uint16_t gen_btn = current_buttons();
@@ -1056,13 +791,18 @@ void km_apply(uint8_t ep_addr, uint8_t *buf, uint16_t len) {
                            (int)mrx, (int)mry);
         }
 #endif
-        if (!force && mrx == 0 && mry == 0 && gen_btn == 0) return;
-        apply_ds5(buf, len, mrx, mry, gen_btn);
+        if (ix == 0 && iy == 0 && gen_btn == 0) return;
+        if (sony_kind == CONTROLLER_DS4) {
+            apply_ds4(buf, len, mrx, mry, gen_btn);
+        } else {
+            apply_ds5(buf, len, mrx, mry, gen_btn);
+        }
         return;
     }
 }
 
 void km_init(void) {
+    km_host_api_init();
     const esp_timer_create_args_t args = {
         .callback        = &km_housekeep_cb,
         .arg             = NULL,

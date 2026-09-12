@@ -109,10 +109,10 @@ can't reboot the chip over that port. Power-cycle to boot the new firmware.
    only inspects the device on attach — if it enumerated while the board was
    still coming up after a flash, it marks the device dead and never looks
    again. Unplug USB1, wait ~5 s, replug once everything else is up.
-4. On the CH343 command port (4000000 baud 8N1):
-   `python accessibility/makcu_access.py` → expect `kmbox: 1.0.0 …`.
-5. `python accessibility/makcu_monitor.py` → should stream `KMS …` telemetry
-   while you move the sticks.
+4. Open the CH343 command port at 4000000 baud, 8N1. Send
+   `km.version()\r\n`; expect `km.MAKCU\r\n>>> `.
+5. Send `km.buttons(1)\r\n`. LT/RT presses should produce the official
+   button snapshots documented in [docs/MAKCU_BUTTONS.md](docs/MAKCU_BUTTONS.md).
 
 ## If it won't connect
 
