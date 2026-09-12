@@ -29,7 +29,9 @@ and the `km.*` serial API). This repo adds:
 - **Left MCU: controller-to-MAKCU bridge** — physical triggers, shoulders,
   Square/X, and right-stick motion are exposed through the official legacy and
   V2 mouse/button/axis streams while the original controller report continues
-  to the target.
+  to the target. Legacy button events use the physically verified KMBox
+  `km.`-plus-mask profile required by Blurred; current-format clients should
+  use V2 because MAKCU defines no legacy-profile negotiation.
 - Diagnostic instrumentation used during debugging (harmless in normal use).
 
 ## Build

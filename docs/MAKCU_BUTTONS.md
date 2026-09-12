@@ -44,6 +44,14 @@ LT down:  6B 6D 2E 02
 LT up:    6B 6D 2E 00
 ```
 
+This is the physically verified older MAKCU/KMBox profile used by existing
+KMBox parsers. The current MAKCU web page documents a different legacy event
+envelope (`km.buttons` + mask + CRLF/prompt). Those two envelopes are mutually
+incompatible and the API defines no negotiation command, so firmware cannot
+safely emit both on one serial stream. This build prioritizes Blurred's KMBox
+legacy framing; current-protocol clients should select V2, whose framing is
+unambiguous.
+
 `km.buttons(2,period_ms)` selects the constructed stream. `km.buttons(0)`
 disables it, and `km.buttons()` queries the mode. The official `km.axis` and
 `km.mouse` stream commands are also accepted; the physical right stick is
