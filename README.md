@@ -63,6 +63,5 @@ Keys: drag inject pad · `1`/`2`/`3` goldens · `H`/`A` hip/ads · `R` reset · 
 
 ```
 soft_makcu/            # curve, drain, blend, km_api, sim, lab_ui, goldens, tests
-tools/soft_makcu/      # thin launcher → python -m soft_makcu
 docs/SOFT_MAKCU.md     # formula sync + keys
 ```

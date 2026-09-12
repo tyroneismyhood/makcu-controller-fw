@@ -96,7 +96,6 @@ python -m soft_makcu
 # or
 python soft_makcu/lab_ui.py
 # or
-python tools/soft_makcu/lab_ui.py
 
 # Headless smoke (CI / no display)
 SOFT_MAKCU_HEADLESS=1 python -m soft_makcu
@@ -139,7 +138,6 @@ soft_makcu/
   lab_ui.py            # OpenCV lab
   golden_vectors.json
   tests/test_golden.py
-tools/soft_makcu/
   lab_ui.py            # thin launcher → soft_makcu.lab_ui
 docs/SOFT_MAKCU.md     # this file
 README.md              # home checklist
