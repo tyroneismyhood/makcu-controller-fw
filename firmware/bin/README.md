@@ -15,7 +15,7 @@ bins.
 SHA-256:
 
 ```text
-e71c0287fe139d2afd294a7ad446bff464c15d704c0725be904d4d1209997140  MERGED_left.bin
+bb02298e03f19fdbef12c6c0cd543234938d4777845a042028b07fa386e62c2f  MERGED_left.bin
 decbcaa73350becd6c16e36d997c57f7f4100de68f188f93ac040a2b96fc5c9f  MERGED_right.bin
 ```
 
