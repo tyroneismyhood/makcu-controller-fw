@@ -61,16 +61,16 @@ Port map:
 
 When Track B changes `KM_GAIN_C` / `KM_GAIN_P` or blend math in `km_inject.c`,
 update `curve.py` / `blend.py` and regenerate `golden_vectors.json`, then
-`pytest soft_makcu/tests` must stay green (≤1 count vs golden for 8/80/240).
+`pytest soft_makcu/tests` must stay green (bit-exact vs SoftAxis EXPECTED_IX for 8/80/240).
 
 ### Float64 vs firmware float32
 
 ESP32-S3 uses `powf` (float32). Soft MAKCU’s default path uses Python
 float64 (`C * mag**P` then truncate toward zero). Empirically, for the
 published golden magnitudes **8 / 80 / 240**, float64 and a float32-forced
-path (`xim_curve_f32`) agree within **0 counts**. Pytest enforces ≤1 count
-vs `golden_vectors.json`. If a future host libm diverges, document the delta
-here and keep the accuracy bar (≤1 vs firmware-expected ix).
+path (`xim_curve_f32`) agree within **0 counts**. Pytest enforces **bit-exact**
+match vs `golden_vectors.json` / SoftAxis EXPECTED_IX. If a future host libm
+diverges, document the delta here — do not reopen a soft-only ±N bar.
 
 ---
 

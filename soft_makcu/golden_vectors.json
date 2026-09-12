@@ -4,7 +4,7 @@
   "P": 0.4,
   "rail": 32767,
   "housekeep_tick_ms": 8,
-  "accuracy_bar": "Host expected ix for accum 8/80/240 must match within 1 count",
+  "accuracy_bar": "Host expected ix for accum 8/80/240 must match SoftAxis EXPECTED_IX bit-exact (no soft-only reopen)",
   "float_note": "Python float64 and float32-forced paths agree within 0 counts for golden 8/80/240.",
   "xim_curve": [
     {

@@ -1,4 +1,4 @@
-"""Golden tests — Soft MAKCU ix must match firmware xim_curve within 1 count."""
+"""Golden tests — Soft MAKCU ix must match firmware xim_curve bit-exact."""
 
 from __future__ import annotations
 
@@ -20,42 +20,38 @@ def golden():
     return json.loads(GOLDEN_PATH.read_text())
 
 
-def test_primary_magnitudes_within_one_count(golden):
-    """Host expected ix for accum 8/80/240 must match within 1 count."""
+def test_primary_magnitudes_bit_exact(golden):
+    """Host expected ix for accum 8/80/240 must match SoftAxis EXPECTED_IX exactly."""
     primary = golden["primary_golden"]
     for key, expected in primary.items():
         mag = int(key)
         got = xim_curve(mag)
-        assert abs(got - expected) <= 1, f"accum={mag}: got {got} expected {expected}"
-        # Exact match for published golden (float64 path)
-        assert got == expected
+        assert got == expected, f"accum={mag}: got {got} expected {expected}"
         # Negative polarity
-        assert xim_curve(-mag) == -expected if expected != 0 else 0
+        assert xim_curve(-mag) == (-expected if expected != 0 else 0)
 
 
 def test_firmware_comment_bands(golden):
-    """Firmware comments: 8→~12k, 80→~29k, 240→rail."""
-    assert 11000 <= xim_curve(8) <= 13000
-    assert 28000 <= xim_curve(80) <= 30000
+    """Firmware comments: 8→~12k, 80→~29k, 240→rail — exact SoftAxis numbers."""
+    assert xim_curve(8) == 11592
+    assert xim_curve(80) == 29119
     assert xim_curve(240) == RAIL
 
 
 def test_all_golden_vectors(golden):
     for row in golden["xim_curve"]:
         mag = row["accum"]
-        assert abs(xim_curve(mag) - row["expected_ix"]) <= 1
         assert xim_curve(mag) == row["expected_ix"]
         if mag:
             assert xim_curve(-mag) == row["expected_ix_neg"]
 
 
-def test_float32_vs_float64_delta(golden):
-    """Document float64 vs float32 — must stay ≤1 for golden mags."""
+def test_float32_vs_float64_bit_exact(golden):
+    """float64 vs float32 paths must agree bit-exact on golden magnitudes."""
     for row in golden["xim_curve"]:
         mag = row["accum"]
-        d = abs(xim_curve(mag) - xim_curve_f32(mag))
-        assert d <= 1, f"accum={mag} f64/f32 delta {d}"
-        assert row["f64_vs_f32_delta"] <= 1
+        assert xim_curve(mag) == xim_curve_f32(mag), f"accum={mag} f64/f32 diverge"
+        assert row["f64_vs_f32_delta"] == 0
 
 
 def test_blend_stick_golden(golden):
