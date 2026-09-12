@@ -268,13 +268,17 @@ static _Atomic int32_t trim_y = 0;
 // km.telem(1|0) toggles it. Emitted from the 8 ms housekeep timer (NOT the
 // USB callback — km_uart_write_raw blocks, so it must never run there) so it
 // can't stall the USB pipe. ASCII line format:
-//   KMS lx=<i> ly=<i> rx=<i> ry=<i> b=<hex>\n
-// Values are RAW physical (pre-deadzone) so a monitor can measure true shake.
+//   KMS lx=<i> ly=<i> rx=<i> ry=<i> lt=<0..1023> rt=<0..1023> b=<hex>\n
+// Stick values are RAW physical (pre-deadzone) so a monitor can measure true
+// shake. Triggers are normalized to 0..1023 across GIP / XInput / DS so a
+// communicator on the KM COM PC can see physical LT/RT (they are analog and
+// never appear in the digital b= mask).
 #ifndef KM_TELEM
 #define KM_TELEM 0
 #endif
 static _Atomic uint32_t telem_on = KM_TELEM;
 static _Atomic int32_t  tel_lx = 0, tel_ly = 0, tel_rx = 0, tel_ry = 0;
+static _Atomic uint32_t tel_lt = 0, tel_rt = 0;  // 0..1023
 static _Atomic uint32_t tel_btn = 0;
 // Diagnostic: does km_apply even run, and what report does it see?
 static _Atomic uint32_t tel_calls = 0;   // km_apply call count
@@ -306,6 +310,10 @@ static inline uint8_t s16_to_u8(int16_t v) {
     if (u < 0) return 0;
     if (u > 255) return 255;
     return (uint8_t)u;
+}
+// Normalize 0..255 trigger bytes (XInput / DS) onto the GIP 0..1023 scale.
+static inline uint32_t trig_u8_to_1023(uint8_t v) {
+    return (uint32_t)v * 1023u / 255u;
 }
 
 // USER-PRIORITY asymmetric XIM-style blend:
@@ -493,11 +501,13 @@ static void km_housekeep_cb(void *arg) {
         static uint32_t tel_div = 0;
         if (++tel_div >= 2) {
             tel_div = 0;
-            char m[128];
+            char m[192];
             int n = snprintf(m, sizeof(m),
-                "KMS lx=%ld ly=%ld rx=%ld ry=%ld b=%04x n=%lu ep=%02x b0=%02x len=%lu\n",
+                "KMS lx=%ld ly=%ld rx=%ld ry=%ld lt=%lu rt=%lu b=%04x n=%lu ep=%02x b0=%02x len=%lu\n",
                 (long)atomic_load(&tel_lx), (long)atomic_load(&tel_ly),
                 (long)atomic_load(&tel_rx), (long)atomic_load(&tel_ry),
+                (unsigned long)atomic_load(&tel_lt),
+                (unsigned long)atomic_load(&tel_rt),
                 (unsigned)atomic_load(&tel_btn),
                 (unsigned long)atomic_load(&tel_calls),
                 (unsigned)atomic_load(&tel_ep),
@@ -864,6 +874,14 @@ void km_apply(uint8_t ep_addr, uint8_t *buf, uint16_t len) {
         atomic_store(&tel_ly, (int32_t)-rd_s16(gp + 8));
         atomic_store(&tel_rx, (int32_t)rd_s16(gp + 10));
         atomic_store(&tel_ry, (int32_t)-rd_s16(gp + 12));
+        {
+            uint16_t lt = (uint16_t)gp[2] | ((uint16_t)gp[3] << 8);
+            uint16_t rt = (uint16_t)gp[4] | ((uint16_t)gp[5] << 8);
+            if (lt > 1023) lt = 1023;
+            if (rt > 1023) rt = 1023;
+            atomic_store(&tel_lt, (uint32_t)lt);
+            atomic_store(&tel_rt, (uint32_t)rt);
+        }
         atomic_store(&tel_btn, (uint32_t)((uint16_t)gp[0] | ((uint16_t)gp[1] << 8)));
         int32_t px, py, ix, iy;
         extract_physical_gip(gp, &px, &py);
@@ -894,6 +912,8 @@ void km_apply(uint8_t ep_addr, uint8_t *buf, uint16_t len) {
         atomic_store(&tel_ly, (int32_t)-rd_s16(buf + 8));
         atomic_store(&tel_rx, (int32_t)rd_s16(buf + 10));
         atomic_store(&tel_ry, (int32_t)-rd_s16(buf + 12));
+        atomic_store(&tel_lt, trig_u8_to_1023(buf[4]));
+        atomic_store(&tel_rt, trig_u8_to_1023(buf[5]));
         atomic_store(&tel_btn, (uint32_t)((uint16_t)buf[2] | ((uint16_t)buf[3] << 8)));
         int32_t px, py, ix, iy;
         extract_physical_xinput(buf, &px, &py);
@@ -923,6 +943,8 @@ void km_apply(uint8_t ep_addr, uint8_t *buf, uint16_t len) {
         atomic_store(&tel_ly, ((int32_t)buf[2] - 128) << 8);
         atomic_store(&tel_rx, ((int32_t)buf[3] - 128) << 8);
         atomic_store(&tel_ry, ((int32_t)buf[4] - 128) << 8);
+        atomic_store(&tel_lt, trig_u8_to_1023(buf[5]));  // L2
+        atomic_store(&tel_rt, trig_u8_to_1023(buf[6]));  // R2
         atomic_store(&tel_btn, (uint32_t)((uint16_t)buf[8] | ((uint16_t)buf[9] << 8)));
         int32_t px, py, ix, iy;
         extract_physical_ds5(buf, &px, &py);

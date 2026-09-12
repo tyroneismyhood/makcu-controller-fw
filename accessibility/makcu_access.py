@@ -119,7 +119,10 @@ class Makcu:
 
     def read_telem(self):
         """Yield parsed telemetry dicts from the 'KMS ...' lines the firmware
-        streams when telem is on. Blocks on the serial read timeout."""
+        streams when telem is on. Blocks on the serial read timeout.
+
+        Fields: lx/ly/rx/ry (sticks), lt/rt (triggers 0..1023), b (digital
+        button mask). lt/rt are absent on older firmware — defaulted to 0."""
         buf = b""
         while True:
             buf += self.ser.read(256)
@@ -133,7 +136,14 @@ class Makcu:
                     k, _, v = tok.partition("=")
                     d[k] = int(v, 16) if k == "b" else int(v)
                 if {"lx", "ly", "rx", "ry"} <= d.keys():
+                    d.setdefault("lt", 0)
+                    d.setdefault("rt", 0)
                     yield d
+
+    @staticmethod
+    def trigger_pressed(value, threshold=64):
+        """True when a 0..1023 trigger reading is past `threshold`."""
+        return int(value) >= int(threshold)
 
 
 # ---------------------------------------------------------------------------
