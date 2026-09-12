@@ -66,6 +66,7 @@ static inline void km_stick_to_delta(int32_t x, int32_t y, uint32_t period_ms,
     int32_t shaped = (norm >> 2) +
         (int32_t)(((int64_t)norm * norm * 3) /
                   (4LL * KM_STICK_MAX));
+    if (norm == KM_STICK_MAX) shaped = KM_STICK_MAX;
     int32_t vx = (int32_t)(((int64_t)x * shaped) / mag);
     int32_t vy = (int32_t)(((int64_t)y * shaped) / mag);
     int64_t scale = (int64_t)KM_MOUSE_MAX_COUNTS_SEC * period_ms;
