@@ -139,7 +139,8 @@ Objective PASS/FAIL remains the default when `--360` is not passed;
 ## Swipe Lab (schema v2 + Elgato preflight)
 
 Lab laptop product path (preview UI, void-gates, lag calib, rich JSON) lives under
-`tools/`. Operator guide: **[tools/SWIPE_LAB.md](../tools/SWIPE_LAB.md)**.
+`tools/`. Just run **`python tools/swipe_ui.py`** (zero-arg auto-detect).
+Operator guide: **[tools/SWIPE_LAB.md](../tools/SWIPE_LAB.md)**.
 
 | Module | Role |
 |--------|------|
@@ -160,16 +161,28 @@ Bring-up checklist: Bench `ELGATO_SWIPE_LAB_BRINGUP.md`.
 - [tools/kmh_fidelity_csv.py](../tools/kmh_fidelity_csv.py) — CSV harness for the same curve
 - [tools/swipe_test.py](../tools/swipe_test.py) — PASS/FAIL known-swipe + `--360` feel/deadzone
 
-## Swipe Lab UI preflight (Elgato + dual laptop)
+## Swipe Lab UI (Elgato + dual laptop)
 
-Before any **automated 360 score**, run preflight on the lab PC:
+On the lab PC, just run:
+
+```bash
+python tools/swipe_ui.py
+```
+
+Zero-arg auto-detects the CH343/MAKCU serial port (VID `1A86` / Makcu|CH340|CH343
+description, else saved config / last preflight) and pins Elgato by name (else
+best-effort first capture device). Default mode is `--lab` (OpenCV). Incomplete
+lag/flash preflight still opens the UI with HUD `preflight incomplete — score gated`.
+
+Before any **automated 360 score**, finish preflight (or stamp via CLI):
 
 ```bash
 python tools/swipe_ui.py --elgato-name "Elgato" --set-lag-ms <ms> --mark-flash-green --preflight-only
-python tools/swipe_ui.py --port COM5 --360   # blocked unless score_allowed
+python tools/swipe_ui.py --360   # blocked unless score_allowed
 ```
 
 Void gates (not soft/late): wrong cam / unpinned Elgato, HDCP/black/exclusive,
 drops, unknown/stale lag, flash sheet not green, wall-clock merge, ROI/colorspace drift.
-See Bench bring-up notes and `tools/swipe_preflight.py`.
+See Bench bring-up notes and `tools/swipe_preflight.py`. Operator guide:
+[tools/SWIPE_LAB.md](../tools/SWIPE_LAB.md).
 

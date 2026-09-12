@@ -10,9 +10,10 @@ Owns: OpenCV HUD, YOLO ROI T0/T1 wiring, binary-search T* on yolo metrics,
 Run All → schema v2 JSON. Secondary fusion via swipe_scorer.
 
 Usage:
+  python tools/swipe_ui.py                 # zero-arg: auto-detect port + Elgato, open --lab
   python tools/swipe_ui.py --preflight-only
   python tools/swipe_ui.py --port COM5 --lab
-  python tools/swipe_ui.py --port COM5          # OpenCV lab if DISPLAY; else tk preflight
+  python tools/swipe_ui.py --run-all       # flags still work; port/camera auto if omitted
   MAKCU_HEADLESS=1 python tools/swipe_ui.py --preflight-only
 """
 
@@ -93,6 +94,154 @@ except ImportError:
 
 
 # ---------------------------------------------------------------------------
+# Auto-detect (zero-arg boot)
+# ---------------------------------------------------------------------------
+
+CH343_VID = 0x1A86  # WCH CH343 / CH340 family — MAKCU USB2 command bridge
+_MAKCU_PORT_HINTS = ("makcu", "makcm", "ch343", "ch340", "wch usb")
+
+
+def _serial_comports() -> list[Any]:
+    try:
+        from serial.tools import list_ports
+    except ImportError:
+        return []
+    try:
+        return list(list_ports.comports())
+    except Exception:
+        return []
+
+
+def detect_makcu_port(
+    *,
+    saved_port: str | None = None,
+    config_port: str | None = None,
+) -> tuple[str, str]:
+    """
+    Scan pyserial ports; prefer CH343 / VID 1A86 / Makcu|CH340|CH343 description.
+    Fall back to accessibility config, then last preflight state, then first port.
+    Returns (port_or_empty, how_chosen).
+    """
+    ports = _serial_comports()
+    for p in ports:
+        if (getattr(p, "vid", None) or 0) == CH343_VID:
+            desc = getattr(p, "description", None) or "CH343"
+            return str(p.device), f"pyserial VID 1A86 ({desc})"
+    for p in ports:
+        blob = " ".join(
+            str(x or "")
+            for x in (
+                getattr(p, "description", ""),
+                getattr(p, "manufacturer", ""),
+                getattr(p, "product", ""),
+                getattr(p, "device", ""),
+            )
+        ).lower()
+        if any(h in blob for h in _MAKCU_PORT_HINTS):
+            desc = getattr(p, "description", None) or p.device
+            return str(p.device), f"pyserial desc match ({desc})"
+    if config_port and str(config_port).strip():
+        return str(config_port).strip(), "saved accessibility config"
+    if saved_port and str(saved_port).strip():
+        return str(saved_port).strip(), "last preflight state"
+    if ports:
+        p = ports[0]
+        desc = getattr(p, "description", None) or p.device
+        return str(p.device), f"first serial port ({desc})"
+    return "", "no serial ports found"
+
+
+def detect_elgato_choice(
+    *,
+    name: str = "",
+    index: int | None = None,
+    state: PreflightState | None = None,
+    devices: list[dict[str, Any]] | None = None,
+    quiet: bool = False,
+) -> tuple[dict[str, Any] | None, str]:
+    """
+    Prefer elgato_capture pin-by-name; else saved preflight; else first capture-like.
+    Returns (device_dict_or_None, how_chosen) and prints what was chosen (unless quiet).
+    """
+    def _announce(pinned: dict[str, Any] | None, how: str) -> None:
+        if quiet:
+            return
+        if pinned is None:
+            print("elgato: no capture devices found", flush=True)
+        else:
+            print(
+                f"elgato: chose {pinned.get('name')!r} index={pinned['index']} ({how})",
+                flush=True,
+            )
+
+    devs = devices if devices is not None else list_devices()
+    if name:
+        pinned = elgato_resolve(name, devices=devs)
+        if pinned:
+            how = f"cli --elgato-name={name!r} idx={pinned['index']}"
+            _announce(pinned, how)
+            return pinned, how
+    if index is not None:
+        pinned = elgato_resolve(int(index), devices=devs)
+        if pinned:
+            how = f"cli --elgato-index={index}"
+            _announce(pinned, how)
+            return pinned, how
+    pinned = elgato_resolve(None, devices=devs)
+    if pinned:
+        how = f"pin-by-name idx={pinned['index']}"
+        _announce(pinned, how)
+        return pinned, how
+    if state is not None:
+        if state.capture_device_name:
+            pinned = elgato_resolve(str(state.capture_device_name), devices=devs)
+            if pinned:
+                how = f"preflight name={state.capture_device_name!r}"
+                _announce(pinned, how)
+                return pinned, how
+        if state.capture_index is not None:
+            pinned = elgato_resolve(int(state.capture_index), devices=devs)
+            if pinned:
+                how = f"preflight index={state.capture_index}"
+                _announce(pinned, how)
+                return pinned, how
+    if devs:
+        d = devs[0]
+        how = f"best-effort first capture-like idx={d['index']}"
+        _announce(d, how)
+        return d, how
+    _announce(None, "no capture devices")
+    return None, "no capture devices"
+
+
+def resolve_config_port() -> str:
+    if not load_config:
+        return ""
+    try:
+        return str(load_config().get("port") or "").strip()
+    except Exception:
+        return ""
+
+
+def print_boot_summary(
+    port: str,
+    elgato: dict[str, Any] | None,
+    state: PreflightState,
+    *,
+    port_how: str = "",
+) -> None:
+    idx = (elgato or {}).get("index", "-")
+    name = (elgato or {}).get("name", "-")
+    allowed = score_allowed(state)
+    print(
+        f"boot: port={port or '(none)'} elgato={idx}/{name!s} "
+        f"score_allowed={'yes' if allowed else 'no'}"
+        + (f" [{port_how}]" if port_how else ""),
+        flush=True,
+    )
+
+
+# ---------------------------------------------------------------------------
 # CLI helpers (Bench gated paths — preserved)
 # ---------------------------------------------------------------------------
 
@@ -164,34 +313,35 @@ class SwipeLab:
         self._connect_makcu()
 
     def _init_capture(self, name: str, index: int | None) -> None:
-        needle: int | str | None = None
-        if name:
-            needle = name
-        elif index is not None:
-            needle = index
-        elif self.state.capture_device_name:
-            needle = self.state.capture_device_name
-        elif self.state.capture_index is not None:
-            needle = int(self.state.capture_index)
-        pinned = elgato_resolve(needle, devices=self.devices)
+        pinned, how = detect_elgato_choice(
+            name=name or "",
+            index=index,
+            state=self.state,
+            devices=self.devices,
+            quiet=True,
+        )
         self.pinned = pinned
         if pinned is None:
-            self.status = "no Elgato pinned — pass --elgato-name / --camera"
+            self.status = "no capture device — pass --elgato-name / --camera"
             self.cap = None
             return
         ok, detail = apply_elgato_pin(
             self.state,
-            device_name=str(pinned.get("name") or name or "Elgato"),
+            device_name=str(pinned.get("name") or name or "capture"),
             device_index=int(pinned["index"]),
         )
         save_preflight_state(self.state)
         cap, info = elgato_open_capture(int(pinned["index"]))
         self.cap = cap
-        self.status = detail if ok else (info.get("reason") or detail)
+        base = detail if ok else (info.get("reason") or detail)
+        self.status = f"{base} [{how}]"
 
     def _connect_makcu(self) -> None:
         if Makcu is None:
             self.status = "makcu_access missing"
+            return
+        if not self.port:
+            self.status = "no MAKCU port — plug USB2 CH343 or pass --port"
             return
         try:
             self.mk = Makcu(self.port)
@@ -199,6 +349,8 @@ class SwipeLab:
             self.mk.steady(False)
             self.mk.trim(0, 0)
             self.mk.idle_dz(0)
+            self.state.makcu_port = self.port
+            save_preflight_state(self.state)
             self.status = f"link {self.version}"
         except Exception as exc:
             self.mk = None
@@ -677,6 +829,13 @@ class SwipeLab:
             save_preflight_state(self.state)
             self.status = f"lag_offset_ms≈{lag_ms:.1f} (refine with --set-lag-ms)"
         elif action == "reconnect_port":
+            port, how = detect_makcu_port(
+                saved_port=self.state.makcu_port,
+                config_port=resolve_config_port(),
+            )
+            if port:
+                self.port = port
+                self.status = f"port redetect {port} [{how}]"
             self._connect_makcu()
         elif action == "game_pulse":
             if self.mk:
@@ -722,12 +881,13 @@ class SwipeLab:
             cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 128, 255), 2)
             cv2.putText(vis, "T1", (x1, y1 - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 128, 255), 1)
         hint = exposure_hint(frame)
+        allowed = score_allowed(self.state)
         lines = [
             f"port={self.port}  look=2  aim=1.50",
             f"Elgato={(self.pinned or {}).get('name', '?')} idx={(self.pinned or {}).get('index', '-')}",
             f"det={self.detector.config.backend}:{self.detector.config.model} avail={self.detector.available}",
             f"TOTAL hip={self.total_hip} ads={self.total_ads}  idle_dz={self.idle_dz_applied}/{self.idle_dz_suggested}",
-            f"score_allowed={score_allowed(self.state)}",
+            f"score_allowed={allowed}",
             self.status[:90],
         ]
         if hint:
@@ -735,6 +895,20 @@ class SwipeLab:
         if self.last_verdict:
             lines.append(f"verdict={self.last_verdict.get('overall')}")
         y = 18
+        if not allowed:
+            # HUD banner (non-blocking — UI still opens)
+            cv2.rectangle(vis, (0, 0), (vis.shape[1], 28), (0, 0, 180), -1)
+            cv2.putText(
+                vis,
+                "preflight incomplete — score gated",
+                (8, 20),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (255, 255, 255),
+                2,
+                cv2.LINE_AA,
+            )
+            y = 46
         for ln in lines:
             cv2.putText(vis, ln, (8, y), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (0, 0, 0), 3, cv2.LINE_AA)
             cv2.putText(vis, ln, (8, y), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (240, 240, 240), 1, cv2.LINE_AA)
@@ -812,12 +986,20 @@ def run_gui_tk(port: str, elgato_name: str) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="MAKCU Swipe Lab UI — YOLO T0/T1 + preflight gate")
+    ap = argparse.ArgumentParser(
+        description="MAKCU Swipe Lab UI — zero-arg auto-detect + YOLO T0/T1 + preflight gate"
+    )
     ap.add_argument("port_pos", nargs="?", default="")
     ap.add_argument("--port", default="")
     ap.add_argument("--preflight-only", action="store_true")
     ap.add_argument("--360", dest="want_360", action="store_true")
-    ap.add_argument("--lab", action="store_true", help="Force OpenCV lab")
+    ap.add_argument(
+        "--lab",
+        action="store_true",
+        default=True,
+        help="OpenCV lab (default). Use --no-lab for tk preflight fallback.",
+    )
+    ap.add_argument("--no-lab", action="store_false", dest="lab")
     ap.add_argument("--elgato-name", default="")
     ap.add_argument("--elgato-index", type=int, default=None)
     ap.add_argument("--camera", type=int, default=None, help="alias --elgato-index")
@@ -830,25 +1012,47 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--run-all", action="store_true", help="Headless-ish run all then exit")
     args = ap.parse_args(argv)
 
-    port = args.port or args.port_pos
-    if not port and load_config:
-        try:
-            port = str(load_config().get("port") or "")
-        except Exception:
-            port = ""
-    if not port:
-        port = "COM5"
+    state = load_preflight_state()
+    # Load lag/flash from disk; incomplete preflight does NOT block UI open.
+    if not score_allowed(state):
+        print(
+            "preflight incomplete — score gated (UI still opens; finish lag/flash in lab)",
+            flush=True,
+        )
 
     elgato_index = args.elgato_index if args.elgato_index is not None else args.camera
-    state = load_preflight_state()
 
-    if args.elgato_name or elgato_index is not None:
+    # --- Serial / MAKCU port auto-detect ---
+    port = (args.port or args.port_pos or "").strip()
+    port_how = "cli"
+    if not port:
+        port, port_how = detect_makcu_port(
+            saved_port=getattr(state, "makcu_port", None),
+            config_port=resolve_config_port(),
+        )
+    if port:
+        state.makcu_port = port
+
+    # --- Elgato / capture auto-detect (print what was chosen) ---
+    elgato_dev, elgato_how = detect_elgato_choice(
+        name=args.elgato_name or "",
+        index=elgato_index,
+        state=state,
+    )
+    if elgato_dev is not None:
         apply_elgato_pin(
             state,
-            device_name=args.elgato_name or state.capture_device_name or "Elgato",
-            device_index=elgato_index,
+            device_name=str(elgato_dev.get("name") or args.elgato_name or "capture"),
+            device_index=int(elgato_dev["index"]),
         )
-        save_preflight_state(state)
+        # Prefer resolved name/index for SwipeLab init
+        if not args.elgato_name:
+            args.elgato_name = str(elgato_dev.get("name") or "")
+        if elgato_index is None:
+            elgato_index = int(elgato_dev["index"])
+    save_preflight_state(state)
+
+    print_boot_summary(port, elgato_dev, state, port_how=port_how)
 
     if args.set_lag_ms is not None:
         state.lag.mark(
@@ -868,14 +1072,17 @@ def main(argv: list[str] | None = None) -> int:
         return print_void(state)
 
     if args.want_360:
-        code = print_void(state)
+        print_void(state)
         if not score_allowed(state):
             print("360 blocked — preflight VOID", file=sys.stderr)
+            return 2
+        if not port:
+            print("no MAKCU port auto-detected — pass --port", file=sys.stderr)
             return 2
         return run_swipe_test(port, ["--360"])
 
     lab = SwipeLab(
-        port,
+        port or "",
         elgato_name=args.elgato_name,
         elgato_index=elgato_index,
         fov_deg=args.fov_deg,
@@ -887,9 +1094,10 @@ def main(argv: list[str] | None = None) -> int:
         print(lab.status)
         return 0 if (lab.report or {}).get("overall") in ("PASS", "PARTIAL", None) else 1
 
-    if args.lab or (cv2 is not None and os.environ.get("DISPLAY") and not os.environ.get("MAKCU_HEADLESS")):
+    # Default mode = --lab (OpenCV). Incomplete preflight still opens UI.
+    if args.lab:
         return lab.loop()
-    return run_gui_tk(port, args.elgato_name)
+    return run_gui_tk(port or "", args.elgato_name)
 
 
 if __name__ == "__main__":

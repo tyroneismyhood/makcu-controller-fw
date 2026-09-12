@@ -158,14 +158,18 @@ Do not implement full YOLO scorer inside swipe_ui — import `yolo_roi`.
 ## How to run
 
 ```bash
-# CLI objective (lab USB2 CH343):
+# Flagship UI — zero args auto-detects CH343 port + Elgato, opens --lab:
+python tools/swipe_ui.py
+
+# CLI objective (lab USB2 CH343) still takes an explicit port:
 python tools/swipe_test.py COM5
 python tools/swipe_test.py COM5 --360
 python tools/swipe_test.py COM5 --game-pulse 40
 
-# UI (when peer ships tools/swipe_ui.py):
-python tools/swipe_ui.py COM5 --capture "Elgato"
-python tools/swipe_ui.py COM5 --capture 1 --width 1920 --height 1080
+# Optional overrides (flags still work):
+python tools/swipe_ui.py --port COM5 --elgato-name "Elgato"
+python tools/swipe_ui.py --run-all
+python tools/swipe_ui.py --preflight-only
 
 # Enum capture devices:
 python tools/elgato_capture.py
@@ -174,6 +178,11 @@ python tools/elgato_capture.py
 python tools/swipe_results_lib.py
 python tools/swipe_preflight.py
 ```
+
+Zero-arg boot prints one line:
+`boot: port=… elgato=<index>/<name> score_allowed=yes|no`.
+If lag/flash preflight is incomplete the UI **still opens** with HUD banner
+`preflight incomplete — score gated` (scoring stays blocked until gates pass).
 
 ---
 
@@ -209,11 +218,13 @@ pip install pyserial opencv-python numpy
 # optional YOLO:
 pip install ultralytics   # or onnxruntime + yolov8n.onnx
 
+# Just run — auto-detects MAKCU (CH343/1A86) + Elgato, default --lab:
+python tools/swipe_ui.py
+
 python tools/swipe_ui.py --preflight-only
-python tools/swipe_ui.py --port COM5 --lab
 # keys: r ROI, d detector, click lock target, 0/1 T0/T1 snaps, h/m hip/ads,
 #       a Run All (objective+rest+YOLO 360 + schema v2 JSON), s save, q quit
-python tools/swipe_ui.py --port COM5 --run-all   # writes tools/results/swipe_results_*.json
+python tools/swipe_ui.py --run-all   # writes tools/results/swipe_results_*.json
 ```
 
 Binary-search T* uses **YOLO** close error only (not optical flow). Final PASS

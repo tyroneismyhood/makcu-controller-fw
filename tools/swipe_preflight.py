@@ -223,6 +223,9 @@ def begin_lag_calib_flash(
 class PreflightState:
     """Operator / session state fed into check_void_gates."""
 
+    # Last MAKCU / CH343 serial port (UI auto-detect fallback)
+    makcu_port: str | None = None
+
     # Capture pin
     capture_device_name: str | None = None
     capture_index: int | None = None
@@ -472,6 +475,7 @@ def save_preflight_state(state: PreflightState, path: str | None = None) -> str:
     path = path or DEFAULT_PREFLIGHT_STORE
     os.makedirs(os.path.dirname(path), exist_ok=True)
     payload = {
+        "makcu_port": state.makcu_port,
         "capture_device_name": state.capture_device_name,
         "capture_index": state.capture_index,
         "capture_is_elgato": state.capture_is_elgato,
@@ -503,6 +507,7 @@ def load_preflight_state(path: str | None = None) -> PreflightState:
     except (OSError, json.JSONDecodeError):
         return st
     for k in (
+        "makcu_port",
         "capture_device_name",
         "capture_index",
         "capture_is_elgato",
