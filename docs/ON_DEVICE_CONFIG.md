@@ -68,10 +68,10 @@ Button changes and serial changes both write NVS.
 
 | File | Role |
 |------|------|
-| `MAKCM_ESP32s3_Pass_Left_IDF/src/km_cfg.c` | NVS, Left BOOT FSM, LED override, settings |
-| `MAKCM_ESP32s3_Pass_Left_IDF/include/km_cfg.h` | API |
+| `firmware/MAKCM_ESP32s3_Pass_Left_IDF/src/km_cfg.c` | NVS, Left BOOT FSM, LED override, settings |
+| `firmware/MAKCM_ESP32s3_Pass_Left_IDF/include/km_cfg.h` | API |
 | `pass_ipc.h` (`FRAME_BTN`) | Right BOOT → Left |
-| `MAKCM_ESP32s3_Pass_Right/src/main.cpp` | Right BOOT GPIO poller |
+| `firmware/MAKCM_ESP32s3_Pass_Right/src/main.cpp` | Right BOOT GPIO poller |
 
 Reflash **both** Left and Right images after pulling this change (Right must
 understand/`emit` `FRAME_BTN`).
