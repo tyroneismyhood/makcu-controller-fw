@@ -46,8 +46,3 @@ pio run -d MAKCM_ESP32s3_Pass_Right -e RIGHT
 ```
 
 First Left build downloads the ESP-IDF toolchain — expect it to take a while.
-
-## On-device config
-
-XIM-style configuration via the flash BOOT buttons (no PC app required).
-See [docs/ON_DEVICE_CONFIG.md](../docs/ON_DEVICE_CONFIG.md).

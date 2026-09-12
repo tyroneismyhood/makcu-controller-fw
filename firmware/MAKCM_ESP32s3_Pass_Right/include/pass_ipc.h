@@ -50,9 +50,6 @@ enum pass_ipc_type : uint8_t {
 
     FRAME_LOG            = 0xF0,
     FRAME_PING           = 0xF1,
-
-    // Right → Left: physical BOOT button next to USB3 (payload[0]=1 press, 0 release).
-    FRAME_BTN            = 0xF2,
 };
 
 enum pass_ipc_xfer_status : uint8_t {

@@ -62,39 +62,11 @@ static void ipc_rx_task(void *) {
     }
 }
 
-
-// Flash BOOT button next to USB3 (GPIO0). Edges are forwarded to Left as
-// FRAME_BTN so on-device config can use both board buttons (XIM-style).
-#define BOOT_BTN_GPIO  0
-static void boot_btn_task(void *) {
-    pinMode(BOOT_BTN_GPIO, INPUT_PULLUP);
-    int stable = 1;
-    uint32_t change_ms = 0;
-    extern bool ipc_send(uint8_t, uint8_t, uint16_t, const uint8_t *, uint16_t);
-    for (;;) {
-        int raw = digitalRead(BOOT_BTN_GPIO);
-        uint32_t now = millis();
-        if (raw != stable) {
-            if (change_ms == 0) change_ms = now;
-            else if ((now - change_ms) >= 30) {
-                stable = raw;
-                change_ms = 0;
-                uint8_t pressed = (stable == 0) ? 1 : 0;
-                ipc_send(FRAME_BTN, 0, 0, &pressed, 1);
-            }
-        } else {
-            change_ms = 0;
-        }
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
-}
-
 void setup() {
     Serial.begin(115200);
     IpcSerial.begin(IPC_UART_BAUD, SERIAL_8N1, IPC_UART_RX, IPC_UART_TX);
 
-    diag_setup();
-    xTaskCreatePinnedToCore(boot_btn_task, "boot_btn", 2048, nullptr, 2, nullptr, 0);      // LED task first so we see liveness even if
+    diag_setup();      // LED task first so we see liveness even if
                        // usb_host_install hangs below.
 
     pass_host.begin(); // Installs usb_host lib, registers client,
