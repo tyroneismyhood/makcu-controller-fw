@@ -1,0 +1,144 @@
+# Soft MAKCU — Class 3 / Track D (host-only virtual MAKCU)
+
+**Branch:** `track-d/soft-makcu`  
+**Mission:** Stop flash→test→reflash (brick risk). Calibrate hip/ADS feel on the
+main PC using the **exact Class 2 / Track B formulas** from
+`firmware/MAKCM_ESP32s3_Pass_Left_IDF/src/km_inject.c`.
+
+Soft MAKCU **never flashes**, never opens `esptool`, never touches USB DFU.
+Profile JSON export is for *later* manual application by Track B tools / sender.
+
+---
+
+## Class 3 vs Class 2
+
+| | Class 2 / Track B | Class 3 / Soft MAKCU (Track D) |
+|---|---|---|
+| Where formulas run | ESP32-S3 firmware (`km_inject.c`) | Host Python (`soft_makcu/`) |
+| Hardware | MAKCU board required | **None** |
+| Flash risk | Yes (brick if bad image) | **None** — never flashes |
+| Curve | `xim_curve` C=5046 P=0.40 rail ±32767 | Same constants + cast semantics |
+| Drain | 8 ms `km_housekeep_cb` | 8 ms `Accumulator.drain` / `SoftMakcu.tick` |
+| Blend | `blend_stick` asymmetric USER-PRIORITY | Identical integer math |
+| Idle DZ | `km.idle_dz` + `clean_idle` only when inj live | Same |
+| Output | Real controller IN reports | Live stick viz + optional profile JSON |
+| Use | On-console fidelity / KMH CSV | Pre-flash hip/ADS tuning, golden unit tests |
+
+Class 2 remains the source of truth on device. Class 3 is a **host twin** so
+you can prove curve + blend + totals before you ever pick up a cable.
+
+---
+
+## How formulas stay in sync with `km_inject.c`
+
+Canonical source (do not invent new constants here):
+
+```c
+// km_inject.c
+#define KM_GAIN_C  5046.0f
+#define KM_GAIN_P  0.40f
+// rx = clamp(C × |accum|^P, ±32767); accum drained every 8 ms
+```
+
+Firmware comments (acceptance bands):
+
+| accum / 8 ms | expected ix | Soft MAKCU golden |
+|---:|---:|---:|
+| 8 | ~12k (tracking) | **11592** |
+| 80 | ~29k (mid) | **29119** |
+| 240 | rail (flick) | **32767** |
+
+Port map:
+
+| Firmware | Soft MAKCU |
+|---|---|
+| `xim_curve` | `soft_makcu/curve.py` |
+| `applyMouseDelta` + `km_housekeep_cb` | `soft_makcu/drain.py` |
+| `blend_stick` / `clamp_s16` / `physical_deadzone_clean` | `soft_makcu/blend.py` |
+| `parse_km_text` / `km.move` / `km.click` / `km.idle_dz` / `km.steady*` | `soft_makcu/km_api.py` |
+| Full engine | `soft_makcu/sim.py` (`SoftMakcu`) |
+| Golden vectors | `soft_makcu/golden_vectors.json` + pytest |
+
+When Track B changes `KM_GAIN_C` / `KM_GAIN_P` or blend math in `km_inject.c`,
+update `curve.py` / `blend.py` and regenerate `golden_vectors.json`, then
+`pytest soft_makcu/tests` must stay green (≤1 count vs golden for 8/80/240).
+
+### Float64 vs firmware float32
+
+ESP32-S3 uses `powf` (float32). Soft MAKCU’s default path uses Python
+float64 (`C * mag**P` then truncate toward zero). Empirically, for the
+published golden magnitudes **8 / 80 / 240**, float64 and a float32-forced
+path (`xim_curve_f32`) agree within **0 counts**. Pytest enforces ≤1 count
+vs `golden_vectors.json`. If a future host libm diverges, document the delta
+here and keep the accuracy bar (≤1 vs firmware-expected ix).
+
+---
+
+## Safety: never flashes
+
+- No import of `esptool`, `espefuse`, or firmware flash helpers.
+- No serial/USB open required for the lab UI or unit tests.
+- `export_profile()` writes JSON only (`soft_makcu/exports/…`). Applying that
+  profile to a board is an explicit Track B / human step — Soft MAKCU will
+  not do it.
+- Banner in the Lab UI: **NEVER FLASHES**.
+
+---
+
+## How to run
+
+From repo root (`makcu-controller-fw/`):
+
+```bash
+# Lab UI (OpenCV) — zero-arg
+python -m soft_makcu
+# or
+python soft_makcu/lab_ui.py
+# or
+python tools/soft_makcu/lab_ui.py
+
+# Headless smoke (CI / no display)
+SOFT_MAKCU_HEADLESS=1 python -m soft_makcu
+# or
+python soft_makcu/lab_ui.py --no-display
+
+# Golden tests (accuracy bar)
+python -m pytest soft_makcu/tests -q
+```
+
+Use the project `.venv` if present (`source .venv/bin/activate`).
+
+### Lab keys
+
+| Key | Action |
+|---|---|
+| Drag left pad | `km.move` deltas |
+| `1` / `2` / `3` | Inject accum 8 / 80 / 240 |
+| `H` / `A` | Run hip / ADS total chunked across 8 ms ticks |
+| `[` `]` | Nudge `total_hip` ±50 |
+| `;` `'` | Nudge `total_ads` ±50 |
+| `D` / `d` | `idle_dz` ±100 |
+| `E` | Export profile JSON |
+| `R` | Reset |
+| `Q` / ESC | Quit |
+
+---
+
+## Package layout
+
+```
+soft_makcu/
+  __init__.py
+  __main__.py          # python -m soft_makcu
+  curve.py             # xim_curve
+  drain.py             # 8 ms accumulator
+  blend.py             # blend_stick / idle_dz
+  km_api.py            # km.move/click/idle_dz/steady shim
+  sim.py               # SoftMakcu engine
+  lab_ui.py            # OpenCV lab
+  golden_vectors.json
+  tests/test_golden.py
+tools/soft_makcu/
+  lab_ui.py            # thin launcher → soft_makcu.lab_ui
+docs/SOFT_MAKCU.md     # this file
+```

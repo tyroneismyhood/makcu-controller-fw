@@ -1,0 +1,1 @@
+# Soft MAKCU test package

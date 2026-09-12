@@ -27,3 +27,7 @@ tools/results/yolo_*
 tools/results/preflight_*.json
 tools/results/lag_calib.json
 tools/results/preflight_state.json
+
+# Soft MAKCU local exports
+soft_makcu/exports/*.json
+soft_makcu/exports/*.png

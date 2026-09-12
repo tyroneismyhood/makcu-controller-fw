@@ -1,0 +1,147 @@
+{
+  "source": "firmware/MAKCM_ESP32s3_Pass_Left_IDF/src/km_inject.c",
+  "C": 5046.0,
+  "P": 0.4,
+  "rail": 32767,
+  "housekeep_tick_ms": 8,
+  "accuracy_bar": "Host expected ix for accum 8/80/240 must match within 1 count",
+  "float_note": "Python float64 and float32-forced paths agree within 0 counts for golden 8/80/240.",
+  "xim_curve": [
+    {
+      "accum": 0,
+      "expected_ix": 0,
+      "expected_ix_neg": 0,
+      "float64_raw": 0.0,
+      "float32_ix": 0,
+      "f64_vs_f32_delta": 0,
+      "note": ""
+    },
+    {
+      "accum": 1,
+      "expected_ix": 5046,
+      "expected_ix_neg": -5046,
+      "float64_raw": 5046.0,
+      "float32_ix": 5046,
+      "f64_vs_f32_delta": 0,
+      "note": ""
+    },
+    {
+      "accum": 2,
+      "expected_ix": 6658,
+      "expected_ix_neg": -6658,
+      "float64_raw": 6658.236917760024,
+      "float32_ix": 6658,
+      "f64_vs_f32_delta": 0,
+      "note": ""
+    },
+    {
+      "accum": 4,
+      "expected_ix": 8785,
+      "expected_ix_neg": -8785,
+      "float64_raw": 8785.596284784484,
+      "float32_ix": 8785,
+      "f64_vs_f32_delta": 0,
+      "note": ""
+    },
+    {
+      "accum": 8,
+      "expected_ix": 11592,
+      "expected_ix_neg": -11592,
+      "float64_raw": 11592.663798630078,
+      "float32_ix": 11592,
+      "f64_vs_f32_delta": 0,
+      "note": "tracking ~12k"
+    },
+    {
+      "accum": 16,
+      "expected_ix": 15296,
+      "expected_ix_neg": -15296,
+      "float64_raw": 15296.611589222939,
+      "float32_ix": 15296,
+      "f64_vs_f32_delta": 0,
+      "note": ""
+    },
+    {
+      "accum": 40,
+      "expected_ix": 22068,
+      "expected_ix_neg": -22068,
+      "float64_raw": 22068.420100471125,
+      "float32_ix": 22068,
+      "f64_vs_f32_delta": 0,
+      "note": ""
+    },
+    {
+      "accum": 80,
+      "expected_ix": 29119,
+      "expected_ix_neg": -29119,
+      "float64_raw": 29119.4549008312,
+      "float32_ix": 29119,
+      "f64_vs_f32_delta": 0,
+      "note": "mid ~29k"
+    },
+    {
+      "accum": 120,
+      "expected_ix": 32767,
+      "expected_ix_neg": -32767,
+      "float64_raw": 34246.78005622088,
+      "float32_ix": 32767,
+      "f64_vs_f32_delta": 0,
+      "note": ""
+    },
+    {
+      "accum": 240,
+      "expected_ix": 32767,
+      "expected_ix_neg": -32767,
+      "float64_raw": 45188.89720268283,
+      "float32_ix": 32767,
+      "f64_vs_f32_delta": 0,
+      "note": "rail / flick"
+    },
+    {
+      "accum": 400,
+      "expected_ix": 32767,
+      "expected_ix_neg": -32767,
+      "float64_raw": 55433.365015226715,
+      "float32_ix": 32767,
+      "f64_vs_f32_delta": 0,
+      "note": ""
+    }
+  ],
+  "blend_stick": [
+    {
+      "real": 0,
+      "inject": 10000,
+      "expected": 10000,
+      "why": "real zero"
+    },
+    {
+      "real": 10000,
+      "inject": 0,
+      "expected": 10000,
+      "why": "inject zero"
+    },
+    {
+      "real": 16384,
+      "inject": 16384,
+      "expected": 24576,
+      "why": "aligned"
+    },
+    {
+      "real": 10000,
+      "inject": -20000,
+      "expected": -10000,
+      "why": "opposing"
+    },
+    {
+      "real": -5000,
+      "inject": -10000,
+      "expected": -13475,
+      "why": "aligned neg"
+    }
+  ],
+  "primary_golden": {
+    "8": 11592,
+    "80": 29119,
+    "240": 32767
+  }
+}
