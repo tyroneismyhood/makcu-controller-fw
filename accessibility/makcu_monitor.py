@@ -45,26 +45,21 @@ def main():
     print("link:", mk.version().strip())
     mk.telem(True)
     print("telemetry ON. Hold the RIGHT stick as steady as you can.")
-    print("Collecting 5 s ...  (buttons → b=; physical LT/RT → lt=/rt= 0..1023)")
+    print("Collecting 5 s ...  (buttons you press will show as changing b=)")
 
     samples = []
     seen_btn = set()
-    peak_lt = peak_rt = 0
     t_end = time.time() + 5.0
     last_print = 0
     for d in mk.read_telem():
         samples.append(d)
         if d["b"]:
             seen_btn.add(d["b"])
-        peak_lt = max(peak_lt, d.get("lt", 0))
-        peak_rt = max(peak_rt, d.get("rt", 0))
         now = time.time()
         if now - last_print > 0.25:
             last_print = now
             print(f"\r rx={d['rx']:+6d} ry={d['ry']:+6d}  "
-                  f"lx={d['lx']:+6d} ly={d['ly']:+6d}  "
-                  f"lt={d.get('lt', 0):4d} rt={d.get('rt', 0):4d}  "
-                  f"b={d['b']:#06x}",
+                  f"lx={d['lx']:+6d} ly={d['ly']:+6d}  b={d['b']:#06x}",
                   end="", flush=True)
         if now >= t_end:
             break
@@ -79,7 +74,6 @@ def main():
 
     print(f"right stick X: peak-to-peak={rx['p2p']}  stdev={rx['stdev']:.0f}")
     print(f"right stick Y: peak-to-peak={ry['p2p']}  stdev={ry['stdev']:.0f}")
-    print(f"triggers peak: LT={peak_lt}  RT={peak_rt}  (0..1023; pull a trigger to verify)")
     if seen_btn:
         print("buttons seen (raw bits):", ", ".join(hex(b) for b in sorted(seen_btn)))
 
