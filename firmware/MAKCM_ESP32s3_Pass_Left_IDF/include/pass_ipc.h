@@ -50,6 +50,10 @@ enum pass_ipc_type {
 
     FRAME_LOG            = 0xF0,  // ASCII log line (Right → Left, tunneled to COM3)
     FRAME_PING           = 0xF1,  // empty payload; responder echoes same seq
+
+    // Right → Left: physical BOOT button next to USB3 (payload[0]=1 press, 0 release).
+    // Used with Left's USB1 BOOT button for XIM-style on-device config.
+    FRAME_BTN            = 0xF2,
 };
 
 enum pass_ipc_xfer_status {

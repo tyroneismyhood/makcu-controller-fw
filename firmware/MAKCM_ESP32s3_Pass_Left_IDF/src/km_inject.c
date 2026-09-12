@@ -37,6 +37,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_timer.h"
+#include "km_cfg.h"
 
 extern int km_uart_write(const void *data, size_t len);
 extern int km_uart_write_raw(const void *data, size_t len);  // never gated by COM3_LOG
@@ -410,7 +411,7 @@ static void applyMouseDelta(int dx, int dy) {
 static inline int32_t xim_curve(int32_t accum) {
     if (accum == 0) return 0;
     int32_t mag = (accum < 0) ? -accum : accum;
-    float r = KM_GAIN_C * powf((float)mag, KM_GAIN_P);
+    float r = km_cfg_gain_c() * powf((float)mag, KM_GAIN_P);
     int32_t ri = (r > 32767.0f) ? 32767 : (int32_t)r;
     return (accum < 0) ? -ri : ri;
 }
@@ -562,29 +563,47 @@ static void parse_km_text(const char *line, uint16_t len) {
         return;
     }
 
+    if (str_starts(buf, n, "km.cfg(")) {
+        km_cfg_dump();
+        return;
+    }
+    if (str_starts(buf, n, "km.gain(")) {
+        int v = 1; sscanf(buf + 8, "%d", &v);
+        if (v < 0) v = 0;
+        if (v > 2) v = 2;
+        km_cfg_store_gain_preset((uint8_t)v);
+        return;
+    }
+
     // Accessibility: steady (tremor-damp) filter + telemetry toggles.
     if (str_starts(buf, n, "km.steady_a(")) {
         int v = 70; sscanf(buf + 12, "%d", &v);
         if (v < 0) v = 0;
         if (v > 99) v = 99;
-        atomic_store(&steady_alpha, v); return;
+        atomic_store(&steady_alpha, v);
+        km_cfg_store_steady_a(v); return;
     }
     if (str_starts(buf, n, "km.steady_d(")) {
         int v = 0; sscanf(buf + 12, "%d", &v);
         if (v < 0) v = 0;
         if (v > 32000) v = 32000;
-        atomic_store(&steady_dead, v); return;
+        atomic_store(&steady_dead, v);         km_cfg_store_steady_a(v);
+                km_cfg_store_steady_d(v);
+        return;
     }
     if (str_starts(buf, n, "km.steady(")) {
         int v = 0; sscanf(buf + 10, "%d", &v);
-        atomic_store(&steady_on, v ? 1 : 0); return;
+        atomic_store(&steady_on, v ? 1 : 0);
+        km_cfg_store_steady(v ? 1 : 0); return;
     }
     if (str_starts(buf, n, "km.telem(")) {
         int v = 0; sscanf(buf + 9, "%d", &v);
-        atomic_store(&telem_on, v ? 1 : 0); return;
+        atomic_store(&telem_on, v ? 1 : 0);         km_cfg_store_steady(v ? 1 : 0);
+        return;
     }
     if (str_starts(buf, n, "km.trim(")) {
-        const char *a = strchr(buf, '('); if (!a) return; a++;
+        const char *a = strchr(buf, '('); if (!a)         km_cfg_store_telem(v ? 1 : 0);
+        return; a++;
         char *e; long x = strtol(a, &e, 10); if (e == a) return;
         while (*e == ' ' || *e == ',' || *e == '\t') e++;
         long y = strtol(e, &e, 10);
@@ -594,6 +613,7 @@ static void parse_km_text(const char *line, uint16_t len) {
         if (y > 32767) y = 32767;
         atomic_store(&trim_x, (int32_t)x);
         atomic_store(&trim_y, (int32_t)y);
+        km_cfg_store_trim((int32_t)x, (int32_t)y);
         return;
     }
 
@@ -970,7 +990,18 @@ void km_apply(uint8_t ep_addr, uint8_t *buf, uint16_t len) {
     }
 }
 
+void km_apply_cfg_live(void) {
+    atomic_store(&telem_on, km_cfg_telem_on());
+    atomic_store(&steady_on, km_cfg_steady_on());
+    atomic_store(&steady_alpha, km_cfg_steady_alpha());
+    atomic_store(&steady_dead, km_cfg_steady_dead());
+    atomic_store(&trim_x, km_cfg_trim_x());
+    atomic_store(&trim_y, km_cfg_trim_y());
+}
+
 void km_init(void) {
+    // Apply on-device / NVS defaults (km_cfg_init runs first from app_main).
+    km_apply_cfg_live();
     const esp_timer_create_args_t args = {
         .callback        = &km_housekeep_cb,
         .arg             = NULL,
