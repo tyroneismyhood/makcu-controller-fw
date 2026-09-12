@@ -178,9 +178,9 @@ static bool parse_mode_period(const char *body, uint32_t *mode, uint32_t *period
     }
     char *end = NULL;
     long m = strtol(p, &end, 10);
-    if (end == p) return false;
+    if (end == p || m < 0 || m > 2) return false;
     *query = false;
-    *mode = (m == 1 || m == 2) ? (uint32_t)m : 0u;
+    *mode = (uint32_t)m;
     *period = 1u;
     while (*end == ' ' || *end == '\t') ++end;
     if (*end == ',') {
@@ -430,10 +430,16 @@ bool km_host_api_handle_legacy(const char *line, uint16_t len) {
     if (button) {
         const char *p = strchr(body, '(') + 1;
         if (*p == ')') {
-            legacy_value_u32(line, len,
-                (full_button_mask() & (1u << (button - 1))) != 0);
+            uint8_t bit = (uint8_t)(1u << (button - 1));
+            uint32_t state = (raw_button_mask() & bit ? 1u : 0u) |
+                (km_api_injected_button_mask() & bit ? 2u : 0u);
+            legacy_value_u32(line, len, state);
         } else {
             long state = strtol(p, NULL, 10);
+            if (state < 0 || state > 2) {
+                legacy_prompt();
+                return true;
+            }
             km_api_set_button((uint8_t)button, (uint8_t)state);
             atomic_fetch_add(&s_pad_seq, 1);
             legacy_ack(line, len);
@@ -547,6 +553,10 @@ void km_host_api_handle_v2(uint8_t cmd, const uint8_t *payload, uint16_t len) {
                             (km_api_injected_button_mask() & bit ? 2u : 0u);
             write_v2(cmd, &state, 1);
         } else {
+            if (len != 1 || payload[0] > 2) {
+                v2_status(cmd, false);
+                return;
+            }
             km_api_set_button(button, payload[0]);
             atomic_fetch_add(&s_pad_seq, 1);
             v2_status(cmd, true);
@@ -554,8 +564,9 @@ void km_host_api_handle_v2(uint8_t cmd, const uint8_t *payload, uint16_t len) {
         return;
     }
     if (cmd == CMD_V2_MOVE) {
-        // x:i16, y:i16, segments:u8, cx1:i8, cy1:i8.
-        if (len != 7 || payload[4] == 0) {
+        // x/y are required; segments and cx1/cy1 are optional as documented.
+        if ((len != 4 && len != 5 && len != 7) ||
+            (len >= 5 && payload[4] == 0)) {
             v2_status(cmd, false);
             return;
         }
@@ -564,7 +575,8 @@ void km_host_api_handle_v2(uint8_t cmd, const uint8_t *payload, uint16_t len) {
         return;
     }
     if (cmd == CMD_V2_MO) {
-        if (len != 8) {
+        if (len != 8 || payload[5] != 0 ||
+            payload[6] != 0 || payload[7] != 0) {
             v2_status(cmd, false);
             return;
         }
@@ -575,9 +587,7 @@ void km_host_api_handle_v2(uint8_t cmd, const uint8_t *payload, uint16_t len) {
         atomic_fetch_add(&s_pad_seq, 1);
         km_api_move((int16_t)rd_le16(payload + 1),
                     (int16_t)rd_le16(payload + 3));
-        // Controller passthrough has no wheel/pan/tilt target. Do not claim
-        // success if the caller requested axes this bridge cannot represent.
-        v2_status(cmd, payload[5] == 0 && payload[6] == 0 && payload[7] == 0);
+        v2_status(cmd, true);
         return;
     }
     if (cmd == CMD_V2_CLICK) {
