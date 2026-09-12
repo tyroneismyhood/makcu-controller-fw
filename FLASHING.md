@@ -143,3 +143,20 @@ or the accessibility features.
 > can't be overwritten by these commands, so a bad app flash is recoverable
 > by re-flashing, but treat anything you can't re-download as precious and
 > back it up first.
+
+## On-device configuration (after flashing)
+
+Once both MCUs are flashed and **USB1 + USB2 + controller on Right** are
+connected, you can change telem / steady / aim-gain from the board itself:
+
+- Long-press the **BOOT button next to USB1** (~2 s) to enter config
+- Short-press Left BOOT to move category; short-press **BOOT next to USB3** to change value
+- Long-press Left BOOT again to save to flash (NVS) and exit
+
+Details: [docs/ON_DEVICE_CONFIG.md](docs/ON_DEVICE_CONFIG.md).
+
+## Communicator menu not seeing LT/RT
+
+The 2nd-laptop menu uses the official MAKCU API `km.buttons(1)` (mouse button
+stream), not gamepad HID. Physical LT/RT are translated to that stream — see
+[docs/MAKCU_BUTTONS.md](docs/MAKCU_BUTTONS.md). Flash updated Left firmware.

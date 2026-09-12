@@ -37,6 +37,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_timer.h"
+#include "km_cfg.h"
 
 extern int km_uart_write(const void *data, size_t len);
 extern int km_uart_write_raw(const void *data, size_t len);  // never gated by COM3_LOG
@@ -268,13 +269,36 @@ static _Atomic int32_t trim_y = 0;
 // km.telem(1|0) toggles it. Emitted from the 8 ms housekeep timer (NOT the
 // USB callback — km_uart_write_raw blocks, so it must never run there) so it
 // can't stall the USB pipe. ASCII line format:
-//   KMS lx=<i> ly=<i> rx=<i> ry=<i> b=<hex>\n
-// Values are RAW physical (pre-deadzone) so a monitor can measure true shake.
+//   KMS lx=<i> ly=<i> rx=<i> ry=<i> lt=<0..1023> rt=<0..1023> b=<hex>\n
+// Stick values are RAW physical (pre-deadzone) so a monitor can measure true
+// shake. Triggers are normalized to 0..1023 across GIP / XInput / DS so a
+// communicator on the KM COM PC can see physical LT/RT (they are analog and
+// never appear in the digital b= mask).
 #ifndef KM_TELEM
 #define KM_TELEM 0
 #endif
 static _Atomic uint32_t telem_on = KM_TELEM;
+
+// Official MAKCU km.buttons() stream — physical pad → mouse button mask for
+// the communicator PC (https://makcu.com/en/api/). Softwares call
+// km.buttons(1) then listen for "km." + 1 raw mask byte on this UART.
+// Mapping (matches existing km.left/right inject aliases):
+//   bit0 left   ← physical RT / fire
+//   bit1 right  ← physical LT / ADS
+//   bit2 middle ← injected middle / X
+//   bit3 ms1    ← LB
+//   bit4 ms2    ← RB
+static _Atomic uint32_t buttons_stream_on = 0;
+static _Atomic uint32_t buttons_last_mask = 0x100; // force first emit after enable
+
+static uint8_t makcu_button_mask(void);
+static void makcu_buttons_emit(uint8_t mask);
+static void makcu_buttons_poll(void);
+static inline uint16_t current_buttons(void);
+
+
 static _Atomic int32_t  tel_lx = 0, tel_ly = 0, tel_rx = 0, tel_ry = 0;
+static _Atomic uint32_t tel_lt = 0, tel_rt = 0;  // 0..1023
 static _Atomic uint32_t tel_btn = 0;
 // Diagnostic: does km_apply even run, and what report does it see?
 static _Atomic uint32_t tel_calls = 0;   // km_apply call count
@@ -306,6 +330,10 @@ static inline uint8_t s16_to_u8(int16_t v) {
     if (u < 0) return 0;
     if (u > 255) return 255;
     return (uint8_t)u;
+}
+// Normalize 0..255 trigger bytes (XInput / DS) onto the GIP 0..1023 scale.
+static inline uint32_t trig_u8_to_1023(uint8_t v) {
+    return (uint32_t)v * 1023u / 255u;
 }
 
 // USER-PRIORITY asymmetric XIM-style blend:
@@ -402,7 +430,7 @@ static void applyMouseDelta(int dx, int dy) {
 static inline int32_t xim_curve(int32_t accum) {
     if (accum == 0) return 0;
     int32_t mag = (accum < 0) ? -accum : accum;
-    float r = KM_GAIN_C * powf((float)mag, KM_GAIN_P);
+    float r = km_cfg_gain_c() * powf((float)mag, KM_GAIN_P);
     int32_t ri = (r > 32767.0f) ? 32767 : (int32_t)r;
     return (accum < 0) ? -ri : ri;
 }
@@ -489,15 +517,20 @@ static void km_housekeep_cb(void *arg) {
     // esp_timer task, not the USB callback, so a blocking km_uart_write_raw
     // can't stall the USB pipe. ~62 Hz (every 2nd 8 ms tick) — enough to
     // sample a 4–12 Hz tremor.
+    // Official MAKCU button stream for the communicator PC.
+    makcu_buttons_poll();
+
     if (atomic_load(&telem_on)) {
         static uint32_t tel_div = 0;
         if (++tel_div >= 2) {
             tel_div = 0;
-            char m[128];
+            char m[192];
             int n = snprintf(m, sizeof(m),
-                "KMS lx=%ld ly=%ld rx=%ld ry=%ld b=%04x n=%lu ep=%02x b0=%02x len=%lu\n",
+                "KMS lx=%ld ly=%ld rx=%ld ry=%ld lt=%lu rt=%lu b=%04x n=%lu ep=%02x b0=%02x len=%lu\n",
                 (long)atomic_load(&tel_lx), (long)atomic_load(&tel_ly),
                 (long)atomic_load(&tel_rx), (long)atomic_load(&tel_ry),
+                (unsigned long)atomic_load(&tel_lt),
+                (unsigned long)atomic_load(&tel_rt),
                 (unsigned)atomic_load(&tel_btn),
                 (unsigned long)atomic_load(&tel_calls),
                 (unsigned)atomic_load(&tel_ep),
@@ -538,6 +571,52 @@ static bool str_starts(const char *s, size_t len, const char *pfx) {
     return len >= n && memcmp(s, pfx, n) == 0;
 }
 
+
+#define MAKCU_BTN_LEFT    0x01
+#define MAKCU_BTN_RIGHT   0x02
+#define MAKCU_BTN_MIDDLE  0x04
+#define MAKCU_BTN_MS1     0x08
+#define MAKCU_BTN_MS2     0x10
+#define TRIG_DOWN_THRESH  64   // of 0..1023 — treat as pressed for activation keys
+
+static void km_prompt(void) {
+    km_uart_write_raw(">>> ", 4);
+}
+
+static void km_reply_01(int on) {
+    km_uart_write_raw(on ? "1\r\n>>> " : "0\r\n>>> ", 7);
+}
+
+// Build official MAKCU mouse-button mask from physical pad + inject holds.
+static uint8_t makcu_button_mask(void) {
+    uint8_t m = 0;
+    if (atomic_load(&tel_rt) >= TRIG_DOWN_THRESH) m |= MAKCU_BTN_LEFT;
+    if (atomic_load(&tel_lt) >= TRIG_DOWN_THRESH) m |= MAKCU_BTN_RIGHT;
+    uint16_t gen = current_buttons();
+    if (gen & BTN_FIRE) m |= MAKCU_BTN_LEFT;
+    if (gen & BTN_ADS)  m |= MAKCU_BTN_RIGHT;
+    if (gen & BTN_X)    m |= MAKCU_BTN_MIDDLE;
+    if (gen & BTN_LB)   m |= MAKCU_BTN_MS1;
+    if (gen & BTN_RB)   m |= MAKCU_BTN_MS2;
+    return m;
+}
+
+static void makcu_buttons_emit(uint8_t mask) {
+    // Wire format verified by makcu-rs/discovery: literal "km." + raw mask byte.
+    uint8_t frame[4] = { 'k', 'm', '.', mask };
+    km_uart_write_raw(frame, 4);
+    atomic_store(&buttons_last_mask, mask);
+}
+
+static void makcu_buttons_poll(void) {
+    if (!atomic_load(&buttons_stream_on)) return;
+    uint8_t mask = makcu_button_mask();
+    uint32_t last = atomic_load(&buttons_last_mask);
+    if (mask != (uint8_t)last) {
+        makcu_buttons_emit(mask);
+    }
+}
+
 static void parse_km_text(const char *line, uint16_t len) {
     char buf[96];
     uint16_t n = len < sizeof(buf) - 1 ? len : sizeof(buf) - 1;
@@ -552,31 +631,101 @@ static void parse_km_text(const char *line, uint16_t len) {
         return;
     }
 
+    // Official MAKCU button stream (communicator activation keys).
+    // km.buttons(1) enable / km.buttons(0) disable / km.buttons() query.
+    if (str_starts(buf, n, "km.buttons(") || str_starts(buf, n, ".buttons(")) {
+        const char *a = strchr(buf, '(');
+        if (!a) { km_prompt(); return; }
+        a++;
+        // empty args → query enabled
+        if (*a == ')') {
+            km_reply_01(atomic_load(&buttons_stream_on) != 0);
+            return;
+        }
+        int mode = 0;
+        sscanf(a, "%d", &mode);
+        if (mode) {
+            atomic_store(&buttons_stream_on, 1);
+            atomic_store(&buttons_last_mask, 0x100); // force emit
+            makcu_buttons_emit(makcu_button_mask());
+        } else {
+            atomic_store(&buttons_stream_on, 0);
+        }
+        km_prompt();
+        return;
+    }
+
+    // Official button state queries: km.left() → 0|1 (physical RT / fire).
+    // Must run BEFORE km.left(1)/km.left(0) inject handlers.
+    if (str_starts(buf, n, "km.left()") || str_starts(buf, n, ".left()")) {
+        km_reply_01(makcu_button_mask() & MAKCU_BTN_LEFT);
+        return;
+    }
+    if (str_starts(buf, n, "km.right()") || str_starts(buf, n, ".right()")) {
+        km_reply_01(makcu_button_mask() & MAKCU_BTN_RIGHT);
+        return;
+    }
+    if (str_starts(buf, n, "km.middle()") || str_starts(buf, n, ".middle()")) {
+        km_reply_01(makcu_button_mask() & MAKCU_BTN_MIDDLE);
+        return;
+    }
+    if (str_starts(buf, n, "km.ms1()") || str_starts(buf, n, ".ms1()")) {
+        km_reply_01(makcu_button_mask() & MAKCU_BTN_MS1);
+        return;
+    }
+    if (str_starts(buf, n, "km.ms2()") || str_starts(buf, n, ".ms2()")) {
+        km_reply_01(makcu_button_mask() & MAKCU_BTN_MS2);
+        return;
+    }
+
+
+    if (str_starts(buf, n, "km.cfg(")) {
+        km_cfg_dump();
+        return;
+    }
+    if (str_starts(buf, n, "km.gain(")) {
+        int v = 1; sscanf(buf + 8, "%d", &v);
+        if (v < 0) v = 0;
+        if (v > 2) v = 2;
+        km_cfg_store_gain_preset((uint8_t)v);
+        return;
+    }
+
     // Accessibility: steady (tremor-damp) filter + telemetry toggles.
     if (str_starts(buf, n, "km.steady_a(")) {
         int v = 70; sscanf(buf + 12, "%d", &v);
         if (v < 0) v = 0;
         if (v > 99) v = 99;
-        atomic_store(&steady_alpha, v); return;
+        atomic_store(&steady_alpha, v);
+        km_cfg_store_steady_a(v); return;
     }
     if (str_starts(buf, n, "km.steady_d(")) {
         int v = 0; sscanf(buf + 12, "%d", &v);
         if (v < 0) v = 0;
         if (v > 32000) v = 32000;
-        atomic_store(&steady_dead, v); return;
+        atomic_store(&steady_dead, v);
+        km_cfg_store_steady_d(v);
+        return;
     }
     if (str_starts(buf, n, "km.steady(")) {
         int v = 0; sscanf(buf + 10, "%d", &v);
-        atomic_store(&steady_on, v ? 1 : 0); return;
+        atomic_store(&steady_on, v ? 1 : 0);
+        km_cfg_store_steady(v ? 1 : 0); return;
     }
     if (str_starts(buf, n, "km.telem(")) {
         int v = 0; sscanf(buf + 9, "%d", &v);
-        atomic_store(&telem_on, v ? 1 : 0); return;
+        atomic_store(&telem_on, v ? 1 : 0);
+        km_cfg_store_telem(v ? 1 : 0);
+        return;
     }
     if (str_starts(buf, n, "km.trim(")) {
-        const char *a = strchr(buf, '('); if (!a) return; a++;
-        char *e; long x = strtol(a, &e, 10); if (e == a) return;
-        while (*e == ' ' || *e == ',' || *e == '\t') e++;
+        const char *a = strchr(buf, '(');
+        if (!a) return;
+        a++;
+        char *e;
+        long x = strtol(a, &e, 10);
+        if (e == a) return;
+        while (*e == ' ' || *e == ',' || *e == '	') e++;
         long y = strtol(e, &e, 10);
         if (x < -32767) x = -32767;
         if (x > 32767) x = 32767;
@@ -584,6 +733,7 @@ static void parse_km_text(const char *line, uint16_t len) {
         if (y > 32767) y = 32767;
         atomic_store(&trim_x, (int32_t)x);
         atomic_store(&trim_y, (int32_t)y);
+        km_cfg_store_trim((int32_t)x, (int32_t)y);
         return;
     }
 
@@ -864,6 +1014,14 @@ void km_apply(uint8_t ep_addr, uint8_t *buf, uint16_t len) {
         atomic_store(&tel_ly, (int32_t)-rd_s16(gp + 8));
         atomic_store(&tel_rx, (int32_t)rd_s16(gp + 10));
         atomic_store(&tel_ry, (int32_t)-rd_s16(gp + 12));
+        {
+            uint16_t lt = (uint16_t)gp[2] | ((uint16_t)gp[3] << 8);
+            uint16_t rt = (uint16_t)gp[4] | ((uint16_t)gp[5] << 8);
+            if (lt > 1023) lt = 1023;
+            if (rt > 1023) rt = 1023;
+            atomic_store(&tel_lt, (uint32_t)lt);
+            atomic_store(&tel_rt, (uint32_t)rt);
+        }
         atomic_store(&tel_btn, (uint32_t)((uint16_t)gp[0] | ((uint16_t)gp[1] << 8)));
         int32_t px, py, ix, iy;
         extract_physical_gip(gp, &px, &py);
@@ -894,6 +1052,8 @@ void km_apply(uint8_t ep_addr, uint8_t *buf, uint16_t len) {
         atomic_store(&tel_ly, (int32_t)-rd_s16(buf + 8));
         atomic_store(&tel_rx, (int32_t)rd_s16(buf + 10));
         atomic_store(&tel_ry, (int32_t)-rd_s16(buf + 12));
+        atomic_store(&tel_lt, trig_u8_to_1023(buf[4]));
+        atomic_store(&tel_rt, trig_u8_to_1023(buf[5]));
         atomic_store(&tel_btn, (uint32_t)((uint16_t)buf[2] | ((uint16_t)buf[3] << 8)));
         int32_t px, py, ix, iy;
         extract_physical_xinput(buf, &px, &py);
@@ -923,6 +1083,8 @@ void km_apply(uint8_t ep_addr, uint8_t *buf, uint16_t len) {
         atomic_store(&tel_ly, ((int32_t)buf[2] - 128) << 8);
         atomic_store(&tel_rx, ((int32_t)buf[3] - 128) << 8);
         atomic_store(&tel_ry, ((int32_t)buf[4] - 128) << 8);
+        atomic_store(&tel_lt, trig_u8_to_1023(buf[5]));  // L2
+        atomic_store(&tel_rt, trig_u8_to_1023(buf[6]));  // R2
         atomic_store(&tel_btn, (uint32_t)((uint16_t)buf[8] | ((uint16_t)buf[9] << 8)));
         int32_t px, py, ix, iy;
         extract_physical_ds5(buf, &px, &py);
@@ -948,7 +1110,18 @@ void km_apply(uint8_t ep_addr, uint8_t *buf, uint16_t len) {
     }
 }
 
+void km_apply_cfg_live(void) {
+    atomic_store(&telem_on, km_cfg_telem_on());
+    atomic_store(&steady_on, km_cfg_steady_on());
+    atomic_store(&steady_alpha, km_cfg_steady_alpha());
+    atomic_store(&steady_dead, km_cfg_steady_dead());
+    atomic_store(&trim_x, km_cfg_trim_x());
+    atomic_store(&trim_y, km_cfg_trim_y());
+}
+
 void km_init(void) {
+    // Apply on-device / NVS defaults (km_cfg_init runs first from app_main).
+    km_apply_cfg_live();
     const esp_timer_create_args_t args = {
         .callback        = &km_housekeep_cb,
         .arg             = NULL,
