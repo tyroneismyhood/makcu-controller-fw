@@ -199,12 +199,23 @@ class MakcuGUI:
 
         grid = ttk.Frame(f); grid.pack(anchor="w", pady=4)
         self.mon_vars = {}
-        for i, k in enumerate(("lx", "ly", "rx", "ry", "b")):
+        for i, k in enumerate(("lx", "ly", "rx", "ry", "lt", "rt", "b")):
             ttk.Label(grid, text=k.upper()+":", width=4).grid(row=i, column=0, sticky="e")
             v = tk.StringVar(value="—")
             self.mon_vars[k] = v
             ttk.Label(grid, textvariable=v, width=10, anchor="w",
                       font=("Consolas", 11)).grid(row=i, column=1, sticky="w")
+
+        # Analog trigger indicators (lt/rt are 0..1023 — not in the b= mask).
+        ttk.Label(f, text="Triggers (live):").pack(anchor="w", pady=(8, 2))
+        tgrid = ttk.Frame(f)
+        tgrid.pack(anchor="w")
+        self.mon_trig_labels = {}
+        for i, name in enumerate(("LT", "RT")):
+            lbl = tk.Label(tgrid, text=name, width=11, relief="ridge",
+                           font=("Segoe UI", 9), bg="#e8e8e8", fg="#888")
+            lbl.grid(row=0, column=i, padx=3, pady=3)
+            self.mon_trig_labels[name] = lbl
 
         # Live button indicator grid — names come from tools/button_map.json.
         self.btn_map = self._load_button_map()
@@ -454,6 +465,8 @@ class MakcuGUI:
                     except ValueError:
                         pass
                 if {"lx", "ly", "rx", "ry"} <= d.keys():
+                    d.setdefault("lt", 0)
+                    d.setdefault("rt", 0)
                     self.tel_q.put(d)
 
     def _drain_telemetry(self):
@@ -465,10 +478,16 @@ class MakcuGUI:
         except queue.Empty:
             pass
         if last:
-            for k in ("lx", "ly", "rx", "ry"):
+            for k in ("lx", "ly", "rx", "ry", "lt", "rt"):
                 self.mon_vars[k].set(str(last.get(k, "—")))
             b = last.get("b", 0)
             self.mon_vars["b"].set(f"{b:#06x}")
+            for name, key in (("LT", "lt"), ("RT", "rt")):
+                lbl = self.mon_trig_labels[name]
+                if last.get(key, 0) >= 64:
+                    lbl.config(bg="#2a6", fg="white")
+                else:
+                    lbl.config(bg="#e8e8e8", fg="#888")
             for name, lbl in self.mon_btn_labels.items():
                 m = self.btn_map[name]
                 if (b & m) == m:
