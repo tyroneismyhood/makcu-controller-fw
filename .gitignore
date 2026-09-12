@@ -1,10 +1,3 @@
-# PlatformIO build output + downloaded deps
-.pio/
-**/.pio/
-**/managed_components/
-**/dependencies.lock
-firmware/MAKCM_ESP32s3_Pass_Left_IDF/sdkconfig.LEFT_IDF
-
 # Python
 *.pyc
 __pycache__/
@@ -12,21 +5,7 @@ __pycache__/
 venv/
 .env
 *.log
-
-# Local user config (auto-created with defaults on first run)
-accessibility/config.json
-
-# Vendor stock binaries kept locally for rollback (not distributed)
-firmware/bin/stock/
-
-# YOLO weights / local lab dumps
-*.pt
-*.onnx
-tools/results/swipe_results_*
-tools/results/yolo_*
-tools/results/preflight_*.json
-tools/results/lag_calib.json
-tools/results/preflight_state.json
+.pytest_cache/
 
 # Soft MAKCU local exports
 soft_makcu/exports/*.json

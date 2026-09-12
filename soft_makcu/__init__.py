@@ -1,7 +1,7 @@
 """Soft MAKCU — Class 3 / host-only virtual MAKCU (Track D).
 
-Bit-faithful port of Class 2 / Track B formulas from
-firmware/MAKCM_ESP32s3_Pass_Left_IDF/src/km_inject.c:
+Bit-faithful port of Class 2 / Track B formulas (the `km_inject.c` twin on
+`track-b`):
 
   applyMouseDelta → 8 ms housekeep drain → xim_curve(C=5046, P=0.40)
   blend_stick asymmetric USER-PRIORITY
