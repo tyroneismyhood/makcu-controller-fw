@@ -101,7 +101,7 @@ def main():
                 print(f"    {name} = {mask:#06x}")
             else:
                 print(f"    no bit seen for {name} — skipped "
-                      "(digital bit not found; analog LT/RT use lt=/rt= fields)")
+                      "(triggers/sticks are analog, not in the b mask)")
     except KeyboardInterrupt:
         print("\naborted — writing what we have.")
     finally:

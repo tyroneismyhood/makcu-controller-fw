@@ -1,59 +1,97 @@
-# Physical pad → MAKCU `km.buttons` (official API)
+# Controller bridge over the official MAKCU API
 
-The communicator menu on the **2nd laptop** does **not** speak gamepad HID.
-It talks the official MAKCU KM serial API over the CH343 COM port and expects
-**mouse button** events.
+The controller still passes through to the target as its original USB device.
+The second laptop does not receive that HID connection; Blurred receives the
+translated state over the middle CH343 serial port.
 
-## What was broken
+No Python process or private command protocol is involved.
 
-The pad played fine on the target (USB passthrough). The blurred menu on the
-communicator PC never saw LT/RT because firmware never implemented the official
-button stream those menus enable:
+## Button mapping
+
+MAKCU exposes five mouse-button bits, so five controller controls can be
+represented without extending the API:
+
+| Mask | MAKCU control | Xbox | PlayStation |
+|------|---------------|------|-------------|
+| `0x01` | left | RT | R2 |
+| `0x02` | right | LT | L2 |
+| `0x04` | middle | X | Square |
+| `0x08` | side1 | LB | L1 |
+| `0x10` | side2 | RB | R1 |
+
+The firmware decodes Xbox GIP, Xbox 360 XInput, DualShock 4, DualSense, and
+DualSense Edge reports. Trigger values cross the pressed threshold at roughly
+6% travel. Releases emit a complete `0x00` snapshot when no mapped controls
+remain pressed.
+
+The official mouse mask has no distinct bits for the other controller buttons.
+Representing those would require a non-MAKCU command, which this firmware does
+not add.
+
+## Legacy protocol
+
+Blurred's legacy KMBox path enables raw physical events with:
 
 ```text
-km.buttons(1)     # menu enables this
+km.buttons(1)\r\n
 ```
 
-## Fix (official API only)
-
-Firmware now implements the verified MAKCU button stream:
-
-| Host command | Behavior |
-|--------------|----------|
-| `km.buttons(1)` | Enable stream |
-| `km.buttons(0)` | Disable stream |
-| `km.buttons()` | Query enabled → `0` / `1` |
-| `km.left()` / `km.right()` / … | Query pressed → `0` / `1` |
-
-When enabled, each change emits the official wire form:
+Each change is emitted in the legacy MAKCU wire form used by existing KMBox
+clients: the bytes `k`, `m`, `.` followed by one raw mask byte. For example:
 
 ```text
-km. <mask_u8>
+LT down:  6B 6D 2E 02
+LT up:    6B 6D 2E 00
 ```
 
-(`k` `m` `.` + one raw mask byte — same as real MAKCU / makcu-rs.)
+This is the physically verified older MAKCU/KMBox profile used by existing
+KMBox parsers. The current MAKCU web page documents a different legacy event
+envelope (`km.buttons` + mask + CRLF/prompt). Those two envelopes are mutually
+incompatible and the API defines no negotiation command, so firmware cannot
+safely emit both on one serial stream. This build prioritizes Blurred's KMBox
+legacy framing; current-protocol clients should select V2, whose framing is
+unambiguous.
 
-### Mask mapping (pad → mouse bits)
+`km.buttons(2,period_ms)` selects the constructed stream. `km.buttons(0)`
+disables it, and `km.buttons()` queries the mode. The official `km.axis` and
+`km.mouse` stream commands are also accepted; the physical right stick is
+translated into relative X/Y values with a radial deadzone and progressive
+fixed-point curve.
 
-| Bit | Mask | MAKCU button | Physical pad |
-|-----|------|--------------|--------------|
-| 0 | `0x01` | left | **RT** (fire) |
-| 1 | `0x02` | right | **LT** (ADS) |
-| 2 | `0x04` | middle | X / middle inject |
-| 3 | `0x08` | ms1 | LB |
-| 4 | `0x10` | ms2 | RB |
+## V2 binary protocol
 
-So if your menu binds an activation key to **mouse right**, pull **LT** on the
-pad. Bind to **mouse left** → pull **RT**.
+V2 uses the official frame:
 
-## What you do
+```text
+50 CMD LEN_LO LEN_HI PAYLOAD...
+```
 
-1. Flash updated **Left** firmware.
-2. Open the communicator menu on the 2nd laptop (it should already call
-   `km.buttons(1)` — that is the MAKCU API, not a custom protocol).
-3. Pull LT/RT on the physical pad — the menu should see right/left mouse
-   button events even while another window is focused (serial is not
-   focus-gated).
+To enable a 1 ms raw button stream:
 
-No Python helper is required. Do not use custom `KMS` telemetry for activation
-keys; use `km.buttons` only.
+```text
+Host:   50 02 02 00 01 01
+Device: 50 02 01 00 00
+```
+
+An LT transition then produces:
+
+```text
+LT down: 50 02 02 00 02 00
+LT up:   50 02 02 00 00 00
+```
+
+Supported V2 compatibility commands are the official button stream (`0x02`),
+axis stream (`0x01`), mouse stream (`0x0C`), five individual mouse buttons,
+click (`0x04`), move (`0x0D`), raw mouse frame (`0x0B`), device (`0xB3`),
+echo (`0xB4`), and version (`0xBF`).
+
+## What LT does
+
+Pulling LT/L2 has two simultaneous effects:
+
+1. Its untouched controller report continues to the game.
+2. If Blurred enabled `buttons`, the communicator receives mouse-right bit
+   `0x02` over serial. Releasing LT sends the corresponding release snapshot.
+
+Serial streaming is independent of which application has keyboard focus.
+Blurred must have the CH343 port open and enable a button stream.

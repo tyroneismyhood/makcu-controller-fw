@@ -27,6 +27,7 @@
 extern void ipc_handle_frame(uint8_t type, uint8_t ep_addr, uint16_t seq,
                              const uint8_t *payload, uint16_t len);
 extern void km_ingest_raw(const uint8_t *payload, uint16_t len);
+extern void km_ingest_v2(uint8_t cmd, const uint8_t *payload, uint16_t len);
 
 static const char *TAG = "ipc";
 static SemaphoreHandle_t ipc_tx_mutex;
@@ -165,23 +166,88 @@ int km_uart_write(const void *data, size_t len) {
 #endif
 }
 
-// Newline-delimited line reader: feeds each line to km_ingest_raw.
+// Mixed official MAKCU protocol reader. Legacy commands are CR/LF-delimited;
+// V2 commands use 50 CMD LEN_LO LEN_HI PAYLOAD and may contain any byte.
+#define KM_V2_MAX_PAYLOAD 64u
+
+enum km_rx_state {
+    KM_RX_IDLE,
+    KM_RX_V2_CMD,
+    KM_RX_V2_LEN_LO,
+    KM_RX_V2_LEN_HI,
+    KM_RX_V2_PAYLOAD,
+    KM_RX_V2_SKIP,
+};
+
 static void km_uart_task(void *arg) {
     (void)arg;
     static char line[256];
-    size_t n = 0;
+    static uint8_t v2_payload[KM_V2_MAX_PAYLOAD];
+    size_t line_len = 0;
+    bool line_overflow = false;
+    enum km_rx_state state = KM_RX_IDLE;
+    uint8_t v2_cmd = 0;
+    uint16_t v2_len = 0;
+    uint16_t v2_have = 0;
     uint8_t chunk[128];
     for (;;) {
         int got = uart_read_bytes(KM_UART_PORT, chunk, sizeof(chunk), 1);
         for (int i = 0; i < got; ++i) {
-            char c = (char)chunk[i];
-            if (c == '\n' || c == '\r') {
-                if (n > 0) {
-                    km_ingest_raw((const uint8_t *)line, (uint16_t)n);
-                    n = 0;
+            uint8_t byte = chunk[i];
+
+            if (state == KM_RX_V2_CMD) {
+                v2_cmd = byte;
+                state = KM_RX_V2_LEN_LO;
+                continue;
+            }
+            if (state == KM_RX_V2_LEN_LO) {
+                v2_len = byte;
+                state = KM_RX_V2_LEN_HI;
+                continue;
+            }
+            if (state == KM_RX_V2_LEN_HI) {
+                v2_len |= (uint16_t)byte << 8;
+                v2_have = 0;
+                if (v2_len == 0) {
+                    km_ingest_v2(v2_cmd, NULL, 0);
+                    state = KM_RX_IDLE;
+                } else {
+                    state = v2_len <= KM_V2_MAX_PAYLOAD
+                          ? KM_RX_V2_PAYLOAD : KM_RX_V2_SKIP;
                 }
-            } else if (n < sizeof(line) - 1) {
-                line[n++] = c;
+                continue;
+            }
+            if (state == KM_RX_V2_PAYLOAD) {
+                v2_payload[v2_have++] = byte;
+                if (v2_have == v2_len) {
+                    km_ingest_v2(v2_cmd, v2_payload, v2_len);
+                    state = KM_RX_IDLE;
+                }
+                continue;
+            }
+            if (state == KM_RX_V2_SKIP) {
+                if (++v2_have == v2_len) state = KM_RX_IDLE;
+                continue;
+            }
+
+            // A V2 frame can only begin between legacy lines. This prevents
+            // an ASCII 'P' inside command arguments from changing protocols.
+            if (byte == 0x50 && line_len == 0 && !line_overflow) {
+                state = KM_RX_V2_CMD;
+                continue;
+            }
+
+            char c = (char)byte;
+            if (c == '\n' || c == '\r') {
+                if (line_len > 0 && !line_overflow) {
+                    line[line_len] = '\0';
+                    km_ingest_raw((const uint8_t *)line, (uint16_t)line_len);
+                }
+                line_len = 0;
+                line_overflow = false;
+            } else if (!line_overflow) {
+                if (line_len < sizeof(line) - 1) line[line_len++] = c;
+                else line_overflow = true;
             }
         }
     }

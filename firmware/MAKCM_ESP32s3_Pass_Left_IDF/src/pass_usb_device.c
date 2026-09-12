@@ -234,7 +234,8 @@ static uint16_t pass_driver_open(uint8_t rhport,
                     if (!slot->is_in) {
                         uint16_t n = slot->mps > sizeof(slot->rx_buf) ?
                                      sizeof(slot->rx_buf) : slot->mps;
-                        usbd_edpt_xfer(rhport, slot->addr, slot->rx_buf, n);
+                        usbd_edpt_xfer(rhport, slot->addr, slot->rx_buf, n,
+                                       false);
                     }
                 } else {
                     ESP_LOGW(TAG, "usbd_edpt_open failed ep=0x%02x", ep->bEndpointAddress);
@@ -374,7 +375,8 @@ static bool pass_driver_xfer_cb(uint8_t rhport, uint8_t ep_addr,
         }
         portEXIT_CRITICAL(&io_lock);
         if (promote_len) {
-            if (!usbd_edpt_xfer(rhport, ep_addr, slot->rx_buf, promote_len)) {
+            if (!usbd_edpt_xfer(rhport, ep_addr, slot->rx_buf, promote_len,
+                                false)) {
                 portENTER_CRITICAL(&io_lock);
                 slot->in_flight = false;
                 portEXIT_CRITICAL(&io_lock);
@@ -396,7 +398,7 @@ static bool pass_driver_xfer_cb(uint8_t rhport, uint8_t ep_addr,
         }
         uint16_t n = slot->mps > sizeof(slot->rx_buf) ?
                      sizeof(slot->rx_buf) : slot->mps;
-        usbd_edpt_xfer(rhport, ep_addr, slot->rx_buf, n);
+        usbd_edpt_xfer(rhport, ep_addr, slot->rx_buf, n, false);
     }
     return true;
 }
@@ -490,7 +492,7 @@ static bool submit_in_core(uint8_t ep_addr, const uint8_t *data, uint16_t len, b
             portEXIT_CRITICAL(&io_lock);
             ok = false;
         } else {
-            ok = usbd_edpt_xfer(0, ep_addr, slot->rx_buf, len);
+            ok = usbd_edpt_xfer(0, ep_addr, slot->rx_buf, len, false);
             if (!ok) {
                 usbd_edpt_release(0, ep_addr);
                 portENTER_CRITICAL(&io_lock);

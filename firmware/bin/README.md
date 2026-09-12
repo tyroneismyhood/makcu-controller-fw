@@ -5,16 +5,22 @@ offset `0x0` (bootloader + partition table + app in one file). The images
 always match the checked-out branch — different branches ship different
 bins.
 
-**This build: 2026-07-08, `main` branch** (stable release build).
+**This build: 2026-09-12, `cursor/km-buttons-stream-90d4` branch.**
 
 | File | MCU | Build |
 |------|-----|-------|
-| `MERGED_left.bin` | Left (USB1, console-facing) | Quiet build (`COM3_LOG=0`) + accessibility features |
+| `MERGED_left.bin` | Left (USB1, console-facing) | Quiet build (`COM3_LOG=0`) + official legacy/V2 controller bridge |
 | `MERGED_right.bin` | Right (USB3, controller host) | Includes the GIP init fix |
 
-Check what is actually flashed on a board: `python accessibility/makcu_access.py`
-— the `km.version()` reply contains the Left build date (`Jul  8 2026` = this
-build; `Jul  7 2026` = the old pre-GIP-fix build, reflash it).
+SHA-256:
+
+```text
+bb02298e03f19fdbef12c6c0cd543234938d4777845a042028b07fa386e62c2f  MERGED_left.bin
+decbcaa73350becd6c16e36d997c57f7f4100de68f188f93ac040a2b96fc5c9f  MERGED_right.bin
+```
+
+After flashing, send `km.version()\r\n` at 4 Mbaud on the middle CH343
+port. The Left firmware replies `km.MAKCU\r\n>>> `.
 
 Target: ESP32-S3, 4 MB flash, DIO @ 80 MHz (do not re-merge with QIO — it
 won't boot).

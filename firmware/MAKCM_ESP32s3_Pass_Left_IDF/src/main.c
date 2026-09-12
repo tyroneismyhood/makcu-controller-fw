@@ -12,7 +12,6 @@
 #include "esp_log.h"
 #include "tinyusb.h"
 #include "pass_ipc.h"
-#include "km_cfg.h"
 
 void ipc_init(void);
 bool ipc_send(uint8_t type, uint8_t ep_addr, uint16_t seq,
@@ -33,6 +32,7 @@ void km_ingest_raw(const uint8_t *payload, uint16_t len);
 void km_apply(uint8_t ep_addr, uint8_t *buf, uint16_t len);
 void km_init(void);
 void km_reset_injection(void);
+void km_set_controller_identity(uint16_t vid, uint16_t pid);
 
 extern int km_uart_write(const void *data, size_t len);
 
@@ -141,7 +141,6 @@ static void start_usb(void) {
         }
         usb_started  = true;
         host_visible = true;
-        km_cfg_set_host_visible(true);
         ESP_LOGI(TAG, "USB started with VID 0x%04X PID 0x%04X (cfg %uB, %u strings)",
                  desc_device.idVendor, desc_device.idProduct,
                  desc_config_len, strings_count);
@@ -164,7 +163,6 @@ static void start_usb(void) {
 
     pass_usb_reconnect();
     host_visible = true;
-        km_cfg_set_host_visible(true);
 }
 
 void ipc_handle_frame(uint8_t type, uint8_t ep_addr, uint16_t seq,
@@ -176,6 +174,8 @@ void ipc_handle_frame(uint8_t type, uint8_t ep_addr, uint16_t seq,
         if (len == 18) {
             memcpy(&desc_device, payload, 18);
             desc_device_valid = true;
+            km_set_controller_identity(desc_device.idVendor,
+                                       desc_device.idProduct);
             poke_main = true;
         }
         break;
@@ -205,7 +205,6 @@ void ipc_handle_frame(uint8_t type, uint8_t ep_addr, uint16_t seq,
         break;
     case FRAME_DEVICE_READY:
         device_ready = true;
-        km_cfg_set_device_ready(true);
         poke_main = true;
         break;
     case FRAME_DEVICE_GONE:
@@ -236,9 +235,6 @@ void ipc_handle_frame(uint8_t type, uint8_t ep_addr, uint16_t seq,
     case FRAME_PING:
         ipc_send(FRAME_PING, 0, seq, NULL, 0);
         break;
-    case FRAME_BTN:
-        km_cfg_on_right_btn(len ? payload[0] : 0);
-        break;
     default:
         break;
     }
@@ -252,12 +248,6 @@ static void led_task(void *arg) {
     bool level = false;
     while (1) {
         uint32_t period;
-        int force_level = -1;
-        if (km_cfg_led_override(&period, &force_level)) {
-            gpio_set_level(DIAG_LED_PIN, force_level);
-            vTaskDelay(pdMS_TO_TICKS(period ? period : 50));
-            continue;
-        }
         if (host_visible)         period = 100;    // 10 Hz — visible to host
         else if (device_ready)    period = 250;    // 4 Hz  — descriptors landed
         else if (desc_config_valid) period = 500;  // 2 Hz
@@ -278,12 +268,12 @@ static void main_task(void *arg) {
             if (host_visible) {
                 km_uart_write("[L] DEVICE_GONE — disconnect\n", 30);
                 pass_usb_disconnect();
-                km_reset_injection();
                 host_visible = false;
-                km_cfg_set_host_visible(false);
             } else {
                 ESP_LOGW(TAG, "DEVICE_GONE while not visible to host");
             }
+            km_reset_injection();
+            km_set_controller_identity(0, 0);
             // Re-arm staging so next FRAME_DESC_* / FRAME_DEVICE_READY
             // cycle has to repopulate before reconnect fires. usb_started
             // stays true — only the D+ pull-up was dropped.
@@ -292,8 +282,6 @@ static void main_task(void *arg) {
             desc_config_len   = 0;
             strings_count     = 0;
             device_ready      = false;
-            km_cfg_set_device_ready(false);
-            km_cfg_set_host_visible(false);
             continue;
         }
         if (!host_visible && device_ready &&
@@ -306,7 +294,6 @@ static void main_task(void *arg) {
 void app_main(void) {
     ESP_LOGI(TAG, "Pass_Left up — waiting for descriptors from Right on UART1");
     ipc_init();
-    km_cfg_init();
     km_init();
     xTaskCreatePinnedToCore(led_task,  "led",   2048, NULL, 1, NULL, 1);
     xTaskCreatePinnedToCore(main_task, "main",  4096, NULL, 3, &main_task_handle, 1);

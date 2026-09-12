@@ -109,10 +109,10 @@ can't reboot the chip over that port. Power-cycle to boot the new firmware.
    only inspects the device on attach — if it enumerated while the board was
    still coming up after a flash, it marks the device dead and never looks
    again. Unplug USB1, wait ~5 s, replug once everything else is up.
-4. On the CH343 command port (4000000 baud 8N1):
-   `python accessibility/makcu_access.py` → expect `kmbox: 1.0.0 …`.
-5. `python accessibility/makcu_monitor.py` → should stream `KMS …` telemetry
-   while you move the sticks.
+4. Open the CH343 command port at 4000000 baud, 8N1. Send
+   `km.version()\r\n`; expect `km.MAKCU\r\n>>> `.
+5. Send `km.buttons(1)\r\n`. LT/RT presses should produce the official
+   button snapshots documented in [docs/MAKCU_BUTTONS.md](docs/MAKCU_BUTTONS.md).
 
 ## If it won't connect
 
@@ -143,17 +143,6 @@ or the accessibility features.
 > can't be overwritten by these commands, so a bad app flash is recoverable
 > by re-flashing, but treat anything you can't re-download as precious and
 > back it up first.
-
-## On-device configuration (after flashing)
-
-Once both MCUs are flashed and **USB1 + USB2 + controller on Right** are
-connected, you can change telem / steady / aim-gain from the board itself:
-
-- Long-press the **BOOT button next to USB1** (~2 s) to enter config
-- Short-press Left BOOT to move category; short-press **BOOT next to USB3** to change value
-- Long-press Left BOOT again to save to flash (NVS) and exit
-
-Details: [docs/ON_DEVICE_CONFIG.md](docs/ON_DEVICE_CONFIG.md).
 
 ## Communicator menu not seeing LT/RT
 

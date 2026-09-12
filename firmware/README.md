@@ -10,7 +10,7 @@ custom IPC protocol); see the repo root [FLASHING.md](../FLASHING.md).
 
 | Path | MCU | Framework | What it does |
 |------|-----|-----------|--------------|
-| `MAKCM_ESP32s3_Pass_Left_IDF/` | Left | ESP-IDF (TinyUSB) | Presents as the controller to the console/PC. Owns the descriptor cache, the report-rewrite pipeline (`src/km_inject.c` — steady filter, trim, telemetry, button latches live here), and the serial command channel. |
+| `MAKCM_ESP32s3_Pass_Left_IDF/` | Left | ESP-IDF (TinyUSB) | Presents as the controller to the console/PC. Owns the descriptor cache, report-rewrite pipeline, and official legacy/V2 MAKCU serial command channel. |
 | `MAKCM_ESP32s3_Pass_Right/` | Right | Arduino + ESP-IDF `usb_host` | Enumerates the real controller, relays descriptors and USB transfers to the Left over a 5 Mbps UART. The **GIP init handshake fix** lives in `src/PassUsbHost.cpp`. |
 | `bin/` | — | — | Prebuilt merged flash images built from this source (see `bin/README.md`). |
 | `flash_tool.py` | — | — | Guided GUI flasher (`pip install pyserial esptool`, then `python flash_tool.py`). `Flash_MAKCM.bat` is a Windows double-click wrapper. |
@@ -26,9 +26,12 @@ and the `km.*` serial API). This repo adds:
   GIP controllers actually start streaming input. Without this the stock
   package delivers no input at all. Details in
   [../docs/ISSUE_REPORT.md](../docs/ISSUE_REPORT.md).
-- **Left MCU: accessibility commands** on the serial channel — `km.steady*`
-  (tremor low-pass + deadzone), `km.trim` (drift cancel), `km.telem`
-  (telemetry stream), plus the existing button hold/latch commands.
+- **Left MCU: controller-to-MAKCU bridge** — physical triggers, shoulders,
+  Square/X, and right-stick motion are exposed through the official legacy and
+  V2 mouse/button/axis streams while the original controller report continues
+  to the target. Legacy button events use the physically verified KMBox
+  `km.`-plus-mask profile required by Blurred; current-format clients should
+  use V2 because MAKCU defines no legacy-profile negotiation.
 - Diagnostic instrumentation used during debugging (harmless in normal use).
 
 ## Build
@@ -46,8 +49,3 @@ pio run -d MAKCM_ESP32s3_Pass_Right -e RIGHT
 ```
 
 First Left build downloads the ESP-IDF toolchain — expect it to take a while.
-
-## On-device config
-
-XIM-style configuration via the flash BOOT buttons (no PC app required).
-See [docs/ON_DEVICE_CONFIG.md](../docs/ON_DEVICE_CONFIG.md).

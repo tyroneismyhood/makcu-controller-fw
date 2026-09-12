@@ -24,8 +24,8 @@ python makcu_gui.py
 Tabs:
 - **Device** — lists serial ports and flags the CH343 (the command port). Click
   *Auto-detect CH343* → *Connect* → *Handshake test* (expects `kmbox: 1.0.0…`).
-- **Monitor** — live stick + trigger (`lt`/`rt` 0..1023) readout plus a named
-  button grid (lights up as you press; names come from `tools/button_map.json`).
+- **Monitor** — live stick readout plus a named button grid (lights up as you
+  press; names come from `tools/button_map.json`).
 - **Buttons** — latch toggles: tap once = button held, tap again = release.
 - **Test** — manual hardware validation, two tests: LB/RB press spam and an
   aim-stick full-left/full-right sweep. Only run when you click a Start
@@ -160,7 +160,7 @@ mk.steady(True)            # turn it on
 | `km.steady(1\|0)`  | enable/disable the aim-stick filter |
 | `km.steady_a(N)`   | smoothing 0..99 (EMA weight of history) |
 | `km.steady_d(N)`   | deadzone 0..32000 |
-| `km.telem(1\|0)`   | stream `KMS lx= ly= rx= ry= lt= rt= b=` lines for the monitor (`lt`/`rt` = physical triggers 0..1023) |
+| `km.telem(1\|0)`   | stream `KMS lx= ly= rx= ry= b=` lines for the monitor |
 | `km.trim(x,y)`     | constant right-stick offset — cancel drift or add a gentle pull |
 
 ### Stick drift / constant pull (`km.trim`)

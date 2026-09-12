@@ -13,7 +13,6 @@ python tools/button_mapper.py COM5     # or name it explicitly
 ```
 
 Notes:
-- Digital face/bumper bits are in `b=`. Sticks are `lx/ly/rx/ry`.
-- Analog triggers are separate: `lt=` / `rt=` on a 0..1023 scale (requires a
-  Left MCU firmware build that emits them).
+- Triggers and sticks are analog — they don't appear in the `b` bitmask
+  (sticks are the `lx/ly/rx/ry` fields; triggers aren't in telemetry yet).
 - Mapping is per controller family (GIP pads generally share one layout).
